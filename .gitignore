@@ -4,6 +4,10 @@ bin-release/
 [Oo]bj/
 [Bb]in/
 
+.venv/
+data/
+
+
 # Other files and folders
 .settings/
 
