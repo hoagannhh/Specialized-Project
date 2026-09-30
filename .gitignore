@@ -10,6 +10,7 @@ data/
 
 # Other files and folders
 .settings/
+**/test.py
 
 # Executables
 *.swf

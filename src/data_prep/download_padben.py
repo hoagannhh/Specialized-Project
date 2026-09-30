@@ -56,5 +56,21 @@ def download_padben(
 if __name__ == "__main__":
     # Bước 1: xem có những config nào, chọn đúng cái gần với bài toán
     # "sentence-pair" / "task1" nhất trước khi tải chính thức.
-    list_available_configs()
-    download_padben()
+    # list_available_configs()
+    # download_padben()
+    
+    for task in range(1, 6):
+        config_name = f"sentence-pair-task{task}"
+        output_path = os.path.join(
+            RAW_DIR,
+            f"padben_sentence_pair_task{task}.json"
+        )
+
+        print(f"\n{'=' * 60}")
+        print(f"ĐANG TẢI {config_name}")
+        print(f"{'=' * 60}")
+
+        download_padben(
+            config_name=config_name,
+            output_path=output_path
+        )

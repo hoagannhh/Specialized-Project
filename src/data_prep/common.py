@@ -59,52 +59,144 @@ def _parse_paraphrase_list(raw_value):
         return [raw_value]
 
 
+# def load_humarin_pairs(raw_path: str = HUMARIN_RAW_PATH) -> pd.DataFrame:
+#     """
+#     Đọc file CSV gốc và trả về DataFrame đã "explode", với 2 cột:
+#         - original_text  : câu gốc
+#         - paraphrase_text: MỘT câu paraphrase tương ứng (1 dòng = 1 cặp)
+
+#     Nếu 1 câu gốc có 5 paraphrase, hàm này sẽ tạo ra 5 dòng riêng biệt,
+#     mỗi dòng đều có cùng original_text nhưng khác paraphrase_text.
+#     """
+#     if not os.path.exists(raw_path):
+#         raise FileNotFoundError(
+#             f"Không tìm thấy file dataset tại: {raw_path}\n"
+#             f"Hãy chạy download_dataset.py trước (trên môi trường có "
+#             f"kết nối internet tới HuggingFace, ví dụ Google Colab)."
+#         )
+
+#     df_raw = pd.read_csv(raw_path)
+
+#     required_cols = {"text", "paraphrases"}
+#     missing = required_cols - set(df_raw.columns)
+#     if missing:
+#         raise ValueError(
+#             f"File dataset thiếu cột bắt buộc: {missing}. "
+#             f"Các cột hiện có: {list(df_raw.columns)}. "
+#             f"Kiểm tra lại xem dataset tải về có đúng cấu trúc không."
+#         )
+
+#     df_raw["paraphrase_list"] = df_raw["paraphrases"].apply(_parse_paraphrase_list)
+
+#     # Explode: biến 1 dòng có list N câu thành N dòng riêng biệt
+#     df_exploded = df_raw.explode("paraphrase_list").reset_index(drop=True)
+
+#     df_pairs = pd.DataFrame({
+#         "original_text": df_exploded["text"],
+#         "paraphrase_text": df_exploded["paraphrase_list"],
+#     })
+
+#     # Loại bỏ dòng thiếu dữ liệu hoặc paraphrase rỗng/trùng với câu gốc
+#     df_pairs = df_pairs.dropna(subset=["original_text", "paraphrase_text"])
+#     df_pairs = df_pairs[
+#         df_pairs["original_text"].str.strip() != df_pairs["paraphrase_text"].str.strip()
+#     ]
+#     df_pairs = df_pairs.drop_duplicates().reset_index(drop=True)
+
+#     return df_pairs
+
+
 def load_humarin_pairs(raw_path: str = HUMARIN_RAW_PATH) -> pd.DataFrame:
     """
-    Đọc file CSV gốc và trả về DataFrame đã "explode", với 2 cột:
-        - original_text  : câu gốc
-        - paraphrase_text: MỘT câu paraphrase tương ứng (1 dòng = 1 cặp)
+    Đọc Humarin và explode paraphrases.
 
-    Nếu 1 câu gốc có 5 paraphrase, hàm này sẽ tạo ra 5 dòng riêng biệt,
-    mỗi dòng đều có cùng original_text nhưng khác paraphrase_text.
+    Mỗi dòng gốc của dataset = 1 group.
+    Nếu một original_text có nhiều paraphrases,
+    tất cả các paraphrases đó sẽ dùng chung group_id.
+
+    Output:
+        group_id
+        original_text
+        paraphrase_text
     """
+
     if not os.path.exists(raw_path):
         raise FileNotFoundError(
-            f"Không tìm thấy file dataset tại: {raw_path}\n"
-            f"Hãy chạy download_dataset.py trước (trên môi trường có "
-            f"kết nối internet tới HuggingFace, ví dụ Google Colab)."
+            f"Không tìm thấy file dataset tại: {raw_path}"
         )
 
     df_raw = pd.read_csv(raw_path)
 
     required_cols = {"text", "paraphrases"}
+
     missing = required_cols - set(df_raw.columns)
+
     if missing:
         raise ValueError(
             f"File dataset thiếu cột bắt buộc: {missing}. "
-            f"Các cột hiện có: {list(df_raw.columns)}. "
-            f"Kiểm tra lại xem dataset tải về có đúng cấu trúc không."
+            f"Các cột hiện có: {list(df_raw.columns)}"
         )
 
-    df_raw["paraphrase_list"] = df_raw["paraphrases"].apply(_parse_paraphrase_list)
+    # ==========================================================
+    # QUAN TRỌNG:
+    # Mỗi dòng gốc của Humarin = một group
+    # ==========================================================
 
-    # Explode: biến 1 dòng có list N câu thành N dòng riêng biệt
-    df_exploded = df_raw.explode("paraphrase_list").reset_index(drop=True)
+    df_raw = df_raw.reset_index(drop=True)
+    df_raw["group_id"] = df_raw.index
+
+    # Parse danh sách paraphrase
+    df_raw["paraphrase_list"] = (
+        df_raw["paraphrases"]
+        .apply(_parse_paraphrase_list)
+    )
+
+    # Explode
+    df_exploded = (
+        df_raw
+        .explode("paraphrase_list")
+        .reset_index(drop=True)
+    )
 
     df_pairs = pd.DataFrame({
+        "group_id": df_exploded["group_id"],
         "original_text": df_exploded["text"],
         "paraphrase_text": df_exploded["paraphrase_list"],
     })
 
-    # Loại bỏ dòng thiếu dữ liệu hoặc paraphrase rỗng/trùng với câu gốc
-    df_pairs = df_pairs.dropna(subset=["original_text", "paraphrase_text"])
+    # Loại bỏ missing
+    df_pairs = df_pairs.dropna(
+        subset=["original_text", "paraphrase_text"]
+    )
+
+    # Chuẩn hóa string
+    df_pairs["original_text"] = (
+        df_pairs["original_text"]
+        .astype(str)
+        .str.strip()
+    )
+
+    df_pairs["paraphrase_text"] = (
+        df_pairs["paraphrase_text"]
+        .astype(str)
+        .str.strip()
+    )
+
+    # Không lấy paraphrase giống hệt original
     df_pairs = df_pairs[
-        df_pairs["original_text"].str.strip() != df_pairs["paraphrase_text"].str.strip()
+        df_pairs["original_text"] != df_pairs["paraphrase_text"]
     ]
-    df_pairs = df_pairs.drop_duplicates().reset_index(drop=True)
 
-    return df_pairs
+    # Xóa duplicate thật sự trong cùng group
+    df_pairs = df_pairs.drop_duplicates(
+        subset=[
+            "group_id",
+            "original_text",
+            "paraphrase_text"
+        ]
+    )
 
+    return df_pairs.reset_index(drop=True)
 
 def ensure_dirs():
     """Tạo sẵn các thư mục output nếu chưa tồn tại."""
