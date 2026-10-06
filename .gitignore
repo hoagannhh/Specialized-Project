@@ -21,3 +21,44 @@ data/
 # Project files, i.e. `.project`, `.actionScriptProperties` and `.flexProperties`
 # should NOT be excluded as they contain compiler settings and other important
 # information for Eclipse / Flash Builder.
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Biến môi trường / API key — TUYỆT ĐỐI không commit
+.env
+
+# Dữ liệu (quá nặng để đưa lên Git, tự tải/tạo lại bằng script trong src/data_prep/)
+data/raw/*
+data/processed/*
+data/splits/*
+data/cross_eval/*
+data/models/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/splits/.gitkeep
+!data/cross_eval/.gitkeep
+!data/models/.gitkeep
+
+# Model checkpoint (nặng, tự train lại bằng script trong src/models/)
+checkpoints/*
+!checkpoints/.gitkeep
+
+# Kết quả EDA / đánh giá (sinh ra từ code, không cần version control)
+evaluation/eda_results/*
+evaluation/results/*
+!evaluation/eda_results/.gitkeep
+!evaluation/results/.gitkeep
+
+# Notebook output (giữ code, bỏ output để diff/review dễ hơn)
+# Nếu muốn giữ cả output đã chạy, comment dòng dưới
+# notebooks/*.ipynb filter=strip-notebook-output
+
+# OS / Editor
+.DS_Store
+.vscode/
+*.swp
