@@ -1,61 +1,123 @@
 """
-Tầng 3 — Định nghĩa kiến trúc model (Bi-Encoder dựa trên Sentence-BERT)
-==========================================================================
+Tầng 3 — Kiến trúc Bi-Encoder (tự xây bằng PyTorch thuần)
+=============================================================
 
-Khác với Tầng 0 (tự viết kiến trúc bằng torch.nn.Module từ đầu vì cần
-custom classifier head), Tầng 3 tận dụng trực tiếp class
-SentenceTransformer có sẵn trong thư viện sentence-transformers — vì
-đây chính xác là kiến trúc Bi-Encoder cần dùng (có sẵn pooling layer,
-sẵn sàng fine-tune bằng Triplet Loss), không cần tự viết lại.
+KHÁC với phiên bản trước (dùng sentence-transformers.SentenceTransformer
+có sẵn) — phiên bản này TỰ VIẾT kiến trúc từ đầu, giống phong cách
+Tầng 0, để:
+    1. Dễ giải thích/bảo vệ trước hội đồng (code nằm ngay trong đồ
+       án, không "ẩn" trong thư viện ngoài)
+    2. Dễ tùy biến (đổi pooling strategy, thêm layer...) nếu cần
 
-File này là NƠI DUY NHẤT định nghĩa cấu hình kiến trúc (tên base
-model...) — train.py và inference.py đều import từ đây, tránh lặp
-code cấu hình ở nhiều nơi khác nhau.
+Kiến trúc: 1 BERT encoder DÙNG CHUNG trọng số cho cả 3 nhánh
+Anchor/Positive/Negative (gọi forward() 3 lần trên CÙNG 1 model) +
+Mean Pooling (không chỉ lấy [CLS]) để tạo embedding câu.
 
-GHI CHÚ VỀ KIẾN TRÚC "1 ENCODER DÙNG CHUNG" (đã thống nhất):
-    Bản chất "dùng chung trọng số cho cả 3 nhánh Anchor/Positive/
-    Negative" đến từ việc TripletLoss của sentence-transformers gọi
-    CÙNG MỘT instance SentenceTransformer 3 lần (1 lần/câu) trong mỗi
-    bước huấn luyện — không phải từ cấu hình đặc biệt nào ở file này.
-    Đây là điểm khác biệt so với TriPlaNet (2025), vốn dùng 3 encoder
-    riêng tham số (xem phần so sánh kiến trúc đã thống nhất trước đó).
+TẠI SAO DÙNG MEAN POOLING THAY VÌ CHỈ LẤY [CLS] (khác Tầng 0 và
+Tầng 4 — 2 tầng đó dùng [CLS] vì là bài toán PHÂN LOẠI, có lớp
+classifier học cách "đọc" [CLS] theo mục đích phân loại cụ thể):
+    Tầng 3 cần tạo ra embedding CÓ Ý NGHĨA HÌNH HỌC để so sánh
+    similarity trực tiếp (không qua classifier nào thêm), nên cần
+    pooling toàn bộ thông tin câu. Đây đúng là cách Sentence-BERT
+    gốc (Reimers & Gurevych, 2019) đề xuất và đã được chứng minh
+    hiệu quả hơn chỉ dùng [CLS] cho bài toán similarity.
 """
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 try:
-    from sentence_transformers import SentenceTransformer
+    from transformers import AutoModel
 except ImportError:
-    SentenceTransformer = None
+    AutoModel = None
 
 
-DEFAULT_BASE_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
-# Model đa ngôn ngữ, 12 layer, hidden_size=384 — nhẹ, phù hợp fine-tune
-# trên tài nguyên GPU hạn chế (Colab/Kaggle free tier). Có thể đổi
-# sang bản lớn hơn ("paraphrase-multilingual-mpnet-base-v2") nếu có
-# đủ tài nguyên và cần độ chính xác cao hơn.
+DEFAULT_PRETRAINED_NAME = "bert-base-multilingual-cased"
 
 
-def _check_library():
-    if SentenceTransformer is None:
-        raise ImportError(
-            "Chưa cài thư viện sentence-transformers. Chạy: "
-            "pip install sentence-transformers"
-        )
-
-
-def build_triplet_encoder(base_model: str = DEFAULT_BASE_MODEL) -> "SentenceTransformer":
+class BiEncoder(nn.Module):
     """
-    Khởi tạo model Bi-Encoder TỪ BASE MODEL GỐC (chưa fine-tune) —
-    dùng trong train.py để bắt đầu quá trình huấn luyện.
+    Model Tầng 3: nhận 1 câu (input_ids/attention_mask đã token hóa),
+    trả về 1 vector embedding (đã chuẩn hóa L2) đại diện cho câu đó.
+
+    QUAN TRỌNG: đây là encoder DUY NHẤT — khi train bằng Triplet
+    Loss, cả 3 câu Anchor/Positive/Negative đều được đưa qua CÙNG
+    instance model này (gọi forward() 3 lần), nên tự động "dùng
+    chung trọng số" mà không cần thiết kế gì đặc biệt thêm.
     """
-    _check_library()
-    print(f"Khởi tạo Bi-Encoder từ base model: {base_model}")
-    return SentenceTransformer(base_model)
+
+    def __init__(self, pretrained_name: str = DEFAULT_PRETRAINED_NAME):
+        super().__init__()
+
+        if AutoModel is None:
+            raise ImportError("Chưa cài thư viện transformers. Chạy: pip install transformers")
+
+        self.encoder = AutoModel.from_pretrained(pretrained_name)
+
+    def _mean_pooling(self, token_embeddings: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Lấy trung bình embedding của TẤT CẢ token thật (bỏ qua token
+        padding), KHÔNG chỉ lấy [CLS] — đây là "Mean Pooling" theo
+        đúng cách Sentence-BERT gốc thiết kế.
+        """
+        mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+        sum_embeddings = torch.sum(token_embeddings * mask_expanded, dim=1)
+        sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)  # tránh chia cho 0
+        return sum_embeddings / sum_mask
+
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Returns
+        -------
+        embedding : torch.Tensor, shape (batch_size, hidden_size)
+                    đã chuẩn hóa L2 (norm=1), để dot product giữa 2
+                    embedding chính là cosine similarity.
+        """
+        outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+        token_embeddings = outputs.last_hidden_state
+
+        sentence_embedding = self._mean_pooling(token_embeddings, attention_mask)
+        sentence_embedding = F.normalize(sentence_embedding, p=2, dim=1)
+
+        return sentence_embedding
 
 
-def load_finetuned_encoder(checkpoint_dir: str) -> "SentenceTransformer":
+class TripletLoss(nn.Module):
     """
-    Load model Bi-Encoder ĐÃ FINE-TUNE từ checkpoint — dùng trong
-    inference.py để suy luận, KHÔNG dùng để train tiếp.
+    Hàm mất mát Triplet Loss — đúng công thức đã trình bày trong
+    Chương 3:
+        L(A, P, N) = max(0, d(A,P) - d(A,N) + margin)
+
+    Dùng cosine DISTANCE (= 1 - cosine similarity) làm d(.,.), vì
+    embedding đã chuẩn hóa L2 ở BiEncoder phía trên.
     """
-    _check_library()
-    return SentenceTransformer(checkpoint_dir)
+
+    def __init__(self, margin: float = 0.5):
+        super().__init__()
+        self.margin = margin
+
+    def forward(
+        self,
+        anchor_emb: torch.Tensor,
+        positive_emb: torch.Tensor,
+        negative_emb: torch.Tensor,
+    ) -> torch.Tensor:
+        # Embedding đã chuẩn hóa L2 -> cosine similarity = dot product
+        sim_ap = torch.sum(anchor_emb * positive_emb, dim=1)
+        sim_an = torch.sum(anchor_emb * negative_emb, dim=1)
+
+        dist_ap = 1 - sim_ap
+        dist_an = 1 - sim_an
+
+        losses = F.relu(dist_ap - dist_an + self.margin)
+
+        return losses.mean()
+
+
+def load_tokenizer(pretrained_name: str = DEFAULT_PRETRAINED_NAME):
+    try:
+        from transformers import AutoTokenizer
+    except ImportError:
+        raise ImportError("Chưa cài thư viện transformers. Chạy: pip install transformers")
+    return AutoTokenizer.from_pretrained(pretrained_name)

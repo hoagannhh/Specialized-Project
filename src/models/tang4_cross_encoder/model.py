@@ -1,55 +1,90 @@
 """
-Tầng 4 — Định nghĩa kiến trúc model (Cross-Encoder)
-======================================================
+Tầng 4 — Kiến trúc Cross-Encoder (tự xây bằng PyTorch thuần)
+================================================================
 
-Tận dụng trực tiếp class CrossEncoder có sẵn trong sentence-transformers
-— đã tích hợp sẵn: ghép [CLS] câu_1 [SEP] câu_2 [SEP], BERT encoder,
-classifier head, và BCEWithLogitsLoss khi num_labels=1. Không cần tự
-viết nn.Module từ đầu như Tầng 0.
+Kiến trúc: ghép 2 câu thành 1 chuỗi duy nhất theo định dạng
+[CLS] câu_1 [SEP] câu_2 [SEP], đưa qua BERT encoder, lấy embedding
+[CLS] (đại diện cho MỐI QUAN HỆ giữa 2 câu, vì self-attention đã
+cho phép 2 câu "nhìn thấy nhau"), qua 1 lớp Linear duy nhất (1 đầu
+ra) để phân loại nhị phân qua sigmoid.
 
-File này là NƠI DUY NHẤT định nghĩa cấu hình kiến trúc — train.py và
-inference.py đều import từ đây.
+Việc ghép 2 câu được transformers.AutoTokenizer tự xử lý khi gọi
+tokenizer(sentence_1, sentence_2, ...) — tự thêm [CLS]/[SEP]/
+token_type_ids đúng chuẩn BERT, không cần tự ghép tay.
 """
 
+import torch
+import torch.nn as nn
+
 try:
-    from sentence_transformers.cross_encoder import CrossEncoder
+    from transformers import AutoModel
 except ImportError:
-    CrossEncoder = None
+    AutoModel = None
 
 
-DEFAULT_BASE_MODEL = "bert-base-multilingual-cased"
-DEFAULT_MAX_LENGTH = 256
+DEFAULT_PRETRAINED_NAME = "bert-base-multilingual-cased"
 
 
-def _check_library():
-    if CrossEncoder is None:
-        raise ImportError(
-            "Chưa cài thư viện sentence-transformers. Chạy: "
-            "pip install sentence-transformers"
+class CrossEncoderModel(nn.Module):
+    """
+    Model Tầng 4: nhận 1 CHUỖI ĐÃ GHÉP (input_ids/attention_mask/
+    token_type_ids của cặp câu), trả về 1 logit (chưa qua sigmoid).
+
+    num_labels=1 (khác Tầng 0 dùng num_classes=2) vì đây là phân
+    loại nhị phân qua 1 giá trị sigmoid duy nhất — dùng với
+    nn.BCEWithLogitsLoss (tự áp dụng sigmoid bên trong khi tính loss,
+    ổn định số học hơn tự gọi sigmoid() rồi mới tính BCE thường).
+    """
+
+    def __init__(self, pretrained_name: str = DEFAULT_PRETRAINED_NAME, dropout: float = 0.1):
+        super().__init__()
+
+        if AutoModel is None:
+            raise ImportError("Chưa cài thư viện transformers. Chạy: pip install transformers")
+
+        self.encoder = AutoModel.from_pretrained(pretrained_name)
+        hidden_size = self.encoder.config.hidden_size
+
+        self.dropout = nn.Dropout(dropout)
+        self.classifier = nn.Linear(hidden_size, 1)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        token_type_ids: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """
+        Returns
+        -------
+        logit : torch.Tensor, shape (batch_size,) — logit THÔ, dùng
+                trực tiếp với BCEWithLogitsLoss lúc train, hoặc qua
+                sigmoid() lúc suy luận để ra xác suất.
+        """
+        outputs = self.encoder(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
         )
 
+        cls_embedding = outputs.last_hidden_state[:, 0, :]
+        cls_embedding = self.dropout(cls_embedding)
 
-def build_cross_encoder(
-    base_model: str = DEFAULT_BASE_MODEL,
-    max_length: int = DEFAULT_MAX_LENGTH,
-) -> "CrossEncoder":
-    """
-    Khởi tạo Cross-Encoder TỪ BASE MODEL GỐC (chưa fine-tune) — dùng
-    trong train.py.
+        logit = self.classifier(cls_embedding).squeeze(-1)
 
-    num_labels=1 -> CrossEncoder tự dùng BCEWithLogitsLoss (phân loại
-    nhị phân qua 1 giá trị sigmoid duy nhất), đúng công thức đã thiết
-    kế trong Chương 3 (Binary Cross-Entropy).
-    """
-    _check_library()
-    print(f"Khởi tạo Cross-Encoder từ base model: {base_model}")
-    return CrossEncoder(base_model, num_labels=1, max_length=max_length)
+        return logit
+
+    @torch.no_grad()
+    def predict_proba(self, input_ids, attention_mask, token_type_ids=None) -> torch.Tensor:
+        """Trả về xác suất (đã qua sigmoid) — dùng lúc suy luận."""
+        self.eval()
+        logit = self.forward(input_ids, attention_mask, token_type_ids)
+        return torch.sigmoid(logit)
 
 
-def load_finetuned_cross_encoder(checkpoint_dir: str) -> "CrossEncoder":
-    """
-    Load Cross-Encoder ĐÃ FINE-TUNE từ checkpoint — dùng trong
-    inference.py, KHÔNG dùng để train tiếp.
-    """
-    _check_library()
-    return CrossEncoder(checkpoint_dir)
+def load_tokenizer(pretrained_name: str = DEFAULT_PRETRAINED_NAME):
+    try:
+        from transformers import AutoTokenizer
+    except ImportError:
+        raise ImportError("Chưa cài thư viện transformers. Chạy: pip install transformers")
+    return AutoTokenizer.from_pretrained(pretrained_name)
