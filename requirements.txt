@@ -1,0 +1,52 @@
+# ============================================================
+# Xử lý dữ liệu / Machine Learning cổ điển
+# ============================================================
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+scipy>=1.10.0
+matplotlib>=3.7.0
+
+# ============================================================
+# Deep Learning / NLP (Tầng 0, 2, 3, 4)
+# ============================================================
+# LƯU Ý: nếu dùng Google Colab, torch đã cài sẵn, có thể bỏ dòng này.
+# Nếu cài trên máy cá nhân không có GPU, cân nhắc dùng bản CPU-only
+# theo hướng dẫn tại: https://pytorch.org/get-started/locally/
+#
+# Toàn bộ Tầng 0, 2, 3, 4 đều TỰ XÂY bằng torch + transformers thuần
+# (không dùng thư viện sentence-transformers) — dễ giải thích/bảo vệ
+# trước hội đồng vì toàn bộ kiến trúc/loss nằm ngay trong code đồ án.
+torch>=2.2.0
+transformers>=4.35.0
+datasets>=2.14.0
+
+# ============================================================
+# Tầng 5 — LLM-as-a-Judge (chỉ cần 1 trong 2, tùy provider dùng)
+# ============================================================
+openai>=1.0.0
+anthropic>=0.18.0
+
+# ============================================================
+# Retrieval — Web Search (hệ thống mở rộng input-1-file)
+# ============================================================
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+# ============================================================
+# Document processing — đọc file đầu vào (.docx, .pdf)
+# ============================================================
+python-docx>=1.1.0
+pdfplumber>=0.10.0
+
+# ============================================================
+# Cấu hình / Tiện ích
+# ============================================================
+python-dotenv>=1.0.0
+
+# ============================================================
+# Notebook (chạy EDA, thử nghiệm)
+# ============================================================
+jupyter>=1.0.0
+nbformat>=5.9.0
+nbclient>=0.9.0
