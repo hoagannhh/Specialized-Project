@@ -1,7 +1,0 @@
-group_id,sentence,split,label,source
-1,Reworded topic number 1,train,0,humarin
-1,Reworded topic number 1,train,1,humarin
-103,human example 1,val,0,padben_task2
-103,human example 1,val,1,padben_task4
-103,human example 1,val,1,padben_task5
-103,human example 1,val,0,padben_task5

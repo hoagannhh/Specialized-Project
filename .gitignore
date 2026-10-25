@@ -64,3 +64,6 @@ output/*
 .DS_Store
 .vscode/
 *.swp
+
+# Local temporary files and test artifacts
+/tmp/

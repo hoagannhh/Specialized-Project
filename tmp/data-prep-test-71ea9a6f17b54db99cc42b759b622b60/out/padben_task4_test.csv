@@ -1,5 +1,0 @@
-family_id,sentence,label,source,task,original_task_label,pair_id,sentence_position,group_id,split
-214,first example 22,1,padben_task4,4,0,422,0,124,test
-214,deep example 22,1,padben_task4,4,1,422,1,124,test
-221,deep example 29,1,padben_task4,4,1,429,0,131,test
-221,first example 29,1,padben_task4,4,0,429,1,131,test
