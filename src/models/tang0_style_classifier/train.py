@@ -8,12 +8,17 @@ dùng Accuracy), tìm ngưỡng quyết định tối ưu trên tập validation
 
 Cách chạy:
     python src/models/tang0_style_classifier/train.py \\
-        --train data/splits/merged_tang0_train.csv \\
-        --val data/splits/merged_tang0_val.csv \\
+        --train data/splits/tang0_train.csv \\
+        --val data/splits/tang0_val.csv \\
         --output-dir checkpoints/tang0
 """
 
 import argparse
+import sys
+from pathlib import Path
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from src.models.runtime import seed_everything, save_bundle, restore_best, select_threshold
 import os
 
 import numpy as np
@@ -31,7 +36,7 @@ except ImportError as e:
         f"pip install torch transformers scikit-learn"
     )
 
-from model import SingleSentenceClassifier, DEFAULT_PRETRAINED_NAME
+from src.models.tang0_style_classifier.model import SingleSentenceClassifier, DEFAULT_PRETRAINED_NAME
 
 
 # ============================================================
@@ -103,19 +108,13 @@ def evaluate(model, dataloader, device):
     return np.array(all_probs), np.array(all_labels)
 
 
-def find_best_threshold(probs: np.ndarray, labels: np.ndarray) -> float:
+def find_best_threshold(probs: np.ndarray, labels: np.ndarray) -> tuple:
     """
     Tìm ngưỡng quyết định cho F1 tốt nhất TRÊN TẬP VALIDATION.
     Ngưỡng này sau đó được áp dụng CỐ ĐỊNH khi test/suy luận thật —
     KHÔNG được tìm lại ngưỡng trên tập test (tránh rò rỉ thông tin).
     """
-    best_threshold, best_f1 = 0.5, 0.0
-    for threshold in np.arange(0.1, 0.91, 0.05):
-        preds = (probs >= threshold).astype(int)
-        f1 = f1_score(labels, preds, zero_division=0)
-        if f1 > best_f1:
-            best_f1, best_threshold = f1, threshold
-    return best_threshold, best_f1
+    return select_threshold(probs, labels)
 
 
 def train(
@@ -128,15 +127,24 @@ def train(
     learning_rate: float = 2e-5,
     num_epochs: int = 5,
     patience: int = 2,
+    seed: int = 42,
 ):
+    if min(batch_size, max_length, num_epochs, patience) < 1:
+        raise ValueError('batch_size, max_length, num_epochs and patience must be positive')
+    seed_everything(seed)
     os.makedirs(output_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Thiết bị: {device}")
 
     df_train = pd.read_csv(train_csv)
     df_val = pd.read_csv(val_csv)
+    if df_train.empty or df_val.empty:
+        raise ValueError('Training and validation datasets must not be empty')
     print(f"Train: {len(df_train):,} dòng | Val: {len(df_val):,} dòng")
 
+    for name, frame in [('train', df_train), ('val', df_val)]:
+        if set(frame['label'].unique()) != {0, 1}:
+            raise ValueError(f'{name} requires both binary labels 0 and 1')
     tokenizer = AutoTokenizer.from_pretrained(pretrained_name)
 
     train_dataset = SingleSentenceDataset(df_train, tokenizer, max_length)
@@ -151,7 +159,7 @@ def train(
     loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-    best_val_f1 = 0.0
+    best_val_f1 = float("-inf")
     epochs_without_improvement = 0
 
     for epoch in range(1, num_epochs + 1):
@@ -167,6 +175,7 @@ def train(
             logits = model(input_ids, attention_mask)
             loss = loss_fn(logits, labels)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
             total_loss += loss.item()
@@ -174,21 +183,22 @@ def train(
         avg_train_loss = total_loss / len(train_loader)
 
         val_probs, val_labels = evaluate(model, val_loader, device)
-        val_preds_05 = (val_probs >= 0.5).astype(int)
-        val_f1_at_05 = f1_score(val_labels, val_preds_05, zero_division=0)
+        val_threshold, _ = find_best_threshold(val_probs, val_labels)
+        val_preds = (val_probs >= val_threshold).astype(int)
+        val_f1 = f1_score(val_labels, val_preds, zero_division=0)
 
         precision, recall, _ = precision_recall_curve(val_labels, val_probs)
         pr_auc = auc(recall, precision)
 
         print(f"\n[Epoch {epoch}] train_loss={avg_train_loss:.4f} "
-              f"val_F1(ngưỡng 0.5)={val_f1_at_05:.4f} val_PR-AUC={pr_auc:.4f}")
+              f"val_F1(threshold={val_threshold:.4f})={val_f1:.4f} val_PR-AUC={pr_auc:.4f}")
 
-        if val_f1_at_05 > best_val_f1:
-            best_val_f1 = val_f1_at_05
+        if val_f1 > best_val_f1:
+            best_val_f1 = val_f1
             epochs_without_improvement = 0
 
             checkpoint_path = os.path.join(output_dir, "tang0_best.pt")
-            torch.save(model.state_dict(), checkpoint_path)
+            save_bundle(model, tokenizer, output_dir, 0, pretrained_name, max_length, threshold=val_threshold, seed=seed, epoch=epoch, val_f1=float(val_f1))
             print(f"  -> Lưu checkpoint tốt nhất: {checkpoint_path}")
         else:
             epochs_without_improvement += 1
@@ -197,7 +207,7 @@ def train(
                 break
 
     # Load lại checkpoint tốt nhất, tìm ngưỡng tối ưu trên val set
-    model.load_state_dict(torch.load(os.path.join(output_dir, "tang0_best.pt")))
+    best_meta = restore_best(model, output_dir, 0)
     val_probs, val_labels = evaluate(model, val_loader, device)
     best_threshold, best_f1 = find_best_threshold(val_probs, val_labels)
 
@@ -207,7 +217,9 @@ def train(
     val_preds_best = (val_probs >= best_threshold).astype(int)
     print(classification_report(val_labels, val_preds_best, target_names=["Người viết", "AI-touched"]))
 
-    # Lưu lại ngưỡng để dùng ở inference.py
+    save_bundle(model, tokenizer, output_dir, 0, pretrained_name, max_length, threshold=best_threshold, seed=seed, **best_meta["training"])
+
+    # Compatibility export; canonical threshold is stored inside the checkpoint.
     with open(os.path.join(output_dir, "threshold.txt"), "w") as f:
         f.write(str(best_threshold))
 
@@ -215,6 +227,8 @@ def train(
 
 
 if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser()
     parser.add_argument("--train", required=True)
     parser.add_argument("--val", required=True)
@@ -225,6 +239,7 @@ if __name__ == "__main__":
     parser.add_argument("--learning-rate", type=float, default=2e-5)
     parser.add_argument("--num-epochs", type=int, default=5)
     parser.add_argument("--patience", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     train(
@@ -236,5 +251,5 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         num_epochs=args.num_epochs,
-        patience=args.patience,
+        patience=args.patience, seed=args.seed,
     )

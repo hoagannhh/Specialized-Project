@@ -15,53 +15,40 @@ import json
 import os
 import re
 
-from prompts import build_judge_prompt
+from pathlib import Path
+import sys
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from src.models.tang5_llm_judge.prompts import build_judge_prompt
 
 
 def _extract_json_from_text(text: str) -> dict:
-    """
-    Trích xuất JSON từ text trả về của LLM, xử lý các trường hợp
-    thường gặp:
-        1. JSON thuần túy (trường hợp lý tưởng)
-        2. JSON bọc trong ```json ... ``` (markdown code fence)
-        3. JSON có thêm câu giải thích trước/sau
-
-    Nếu không parse được, trả về dict mặc định với cờ "parse_error"
-    thay vì crash toàn bộ pipeline.
-    """
-    text = text.strip()
-
-    # Trường hợp 1: thử parse trực tiếp
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # Trường hợp 2: tìm trong code fence ```json ... ``` hoặc ``` ... ```
-    code_fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if code_fence_match:
+    """Reject valid JSON with the wrong schema, not only malformed JSON."""
+    if not isinstance(text, str):
+        text = ''
+    candidates = [text.strip()]
+    candidates.extend(re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL))
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        candidates.append(match.group(0))
+    for candidate in candidates:
         try:
-            return json.loads(code_fence_match.group(1))
-        except json.JSONDecodeError:
-            pass
-
-    # Trường hợp 3: tìm khối {...} đầu tiên trong text (kể cả có chữ xung quanh)
-    brace_match = re.search(r"\{.*\}", text, re.DOTALL)
-    if brace_match:
-        try:
-            return json.loads(brace_match.group(0))
-        except json.JSONDecodeError:
-            pass
-
-    # Không parse được -> trả về mặc định an toàn, KHÔNG crash
-    return {
-        "is_paraphrase": None,
-        "confidence": None,
-        "changed_phrases": [],
-        "explanation": None,
-        "parse_error": True,
-        "raw_response": text[:500],  # giữ lại 1 phần để debug sau
-    }
+            value = json.loads(candidate)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        phrases = value.get('changed_phrases')
+        explanation = value.get('explanation')
+        if not isinstance(explanation, str) or not explanation.strip() or not isinstance(phrases, list):
+            continue
+        if any(not isinstance(p, dict) or any(not isinstance(p.get(k), str) or not p[k].strip()
+               for k in ('original','changed_to')) for p in phrases):
+            continue
+        # Discard any model-invented label/confidence fields.
+        return {'changed_phrases': [{'original':p['original'], 'changed_to':p['changed_to']} for p in phrases],
+                'explanation': explanation, 'parse_error': False}
+    return {'changed_phrases': [], 'explanation': None, 'parse_error': True}
 
 
 def call_openai(prompt: str, model: str = "gpt-4o-mini", api_key: str = None) -> str:
@@ -126,7 +113,10 @@ def tang5_judge(
     ----------
     provider : "openai" hoặc "anthropic"
     """
-    prompt = build_judge_prompt(sentence_a, sentence_b, model_label, model_probability)
+    # Compatibility: the document pipeline passes suspect first, source second.
+    suspect_sentence, source_sentence = sentence_a, sentence_b
+    prompt = build_judge_prompt(source_sentence=source_sentence, suspect_sentence=suspect_sentence,
+                                model_label=model_label, model_probability=model_probability)
 
     if provider == "openai":
         raw_text = call_openai(prompt, api_key=api_key)
@@ -137,11 +127,18 @@ def tang5_judge(
 
     result = _extract_json_from_text(raw_text)
 
+    if not result['parse_error']:
+        for phrase in result['changed_phrases']:
+            if phrase['original'] not in source_sentence or phrase['changed_to'] not in suspect_sentence:
+                result = {'changed_phrases': [], 'explanation': None, 'parse_error': True,
+                          'error': 'unsupported_evidence_span'}
+                break
+
     if result.get("parse_error"):
         print(
             "CẢNH BÁO: không parse được JSON từ phản hồi của LLM. "
-            "Xem 'raw_response' trong kết quả để debug. Hệ thống vẫn "
-            "tiếp tục chạy (không crash), dùng nhãn từ Tầng 4 làm "
+            "Phản hồi sai cấu trúc hoặc thiếu bằng chứng hợp lệ. Hệ thống vẫn "
+            "tiếp tục chạy (không crash), giữ nhãn định lượng của pipeline làm "
             "kết quả cuối, không có giải thích chi tiết."
         )
 

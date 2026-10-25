@@ -3,8 +3,8 @@ download_padben.py
 -------------------
 Tải dataset phụ PADBen (JonathanZha/PADBen) từ HuggingFace.
 
-VAI TRÒ: dataset này CHỈ dùng để đánh giá chéo (cross-dataset evaluation),
-KHÔNG trộn vào tập train chính (xem evaluation/cross_dataset_eval.py).
+VAI TRÒ: prepare_datasets.py dùng Task 1/2/3 cho bước 0 và giữ các nhóm
+test của Task 4/5 để đánh giá. Nhãn task phải được ánh xạ trước khi gộp.
 
 LƯU Ý QUAN TRỌNG:
     - Cần kết nối internet tới HuggingFace Hub, chạy trên Colab/Kaggle.

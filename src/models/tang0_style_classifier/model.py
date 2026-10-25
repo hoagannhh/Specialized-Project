@@ -11,6 +11,12 @@ embedding của token [CLS], phân loại nhị phân:
 toán đơn-câu (không phải cặp câu).
 """
 
+from pathlib import Path
+import sys
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from src.models.runtime import make_encoder
+
 import torch
 import torch.nn as nn
 
@@ -37,6 +43,7 @@ class SingleSentenceClassifier(nn.Module):
         pretrained_name: str = DEFAULT_PRETRAINED_NAME,
         num_classes: int = 2,
         dropout: float = 0.1,
+        encoder_config=None,
     ):
         super().__init__()
 
@@ -45,7 +52,7 @@ class SingleSentenceClassifier(nn.Module):
                 "Chưa cài thư viện transformers. Chạy: pip install transformers"
             )
 
-        self.encoder = AutoModel.from_pretrained(pretrained_name)
+        self.encoder = make_encoder(pretrained_name, encoder_config)
         hidden_size = self.encoder.config.hidden_size
 
         self.dropout = nn.Dropout(dropout)

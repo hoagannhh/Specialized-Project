@@ -5,7 +5,7 @@ Tầng 1 — Lọc thô (TF-IDF + Cosine Similarity)
 VAI TRÒ ĐÚNG theo kiến trúc CaTE-X (xem sơ đồ pipeline tổng quan):
     Nhận MỘT CẶP câu (sentence_a, sentence_b) ĐÃ CÓ SẴN (từ Tầng 0 +
     Web Search, hoặc từ dataset test), tính độ tương đồng từ vựng bề
-    mặt, quyết định DỪNG (loại bỏ) hay TIẾP TỤC sang Tầng 2.
+    mặt, trả điểm để hệ thống tiếp tục chạy các tầng sau, không dừng sớm.
 
     Đây KHÔNG PHẢI một hệ thống tìm kiếm (retrieval) quét qua cả kho
     corpus để tìm câu giống nhất — việc "tìm ứng viên nguồn" là
@@ -42,7 +42,7 @@ DATA_DIR = BASE_DIR / "data"
 VECTORIZER_DIR = DATA_DIR / "models" / "tang1"
 VECTORIZER_PATH = VECTORIZER_DIR / "tfidf_vectorizer.pkl"
 
-DEFAULT_THRESHOLD = 0.1  # Loại bỏ nếu similarity < ngưỡng này (đúng theo sơ đồ)
+DEFAULT_THRESHOLD = 0.1  # Legacy compatibility only; no early exit.
 
 
 # ============================================================
@@ -109,124 +109,63 @@ def fit_reference_vectorizer(
 # BƯỚC 2 — LOAD (dùng lại nhiều lần, có cache trong bộ nhớ)
 # ============================================================
 
-_cached_vectorizer = None  # cache cấp module, tránh đọc lại file .pkl nhiều lần
+_vectorizer_cache = {}
 
 
-def load_vectorizer(path: Path = VECTORIZER_PATH, use_cache: bool = True) -> TfidfVectorizer:
-    """
-    Load vectorizer đã fit sẵn, có cache trong bộ nhớ.
-
-    QUAN TRỌNG: nếu gọi hàm này nhiều lần trong 1 phiên chạy (ví dụ
-    lặp qua hàng trăm câu trong 1 file, như kiến trúc hệ thống mở
-    rộng đã thiết kế), cache giúp CHỈ ĐỌC FILE 1 LẦN DUY NHẤT, không
-    tốn I/O lặp lại cho từng câu — đây chính là lỗi hiệu năng đã
-    phát hiện ở phiên bản search_sentence() trước đó.
-    """
-    global _cached_vectorizer
-    if use_cache and _cached_vectorizer is not None:
-        return _cached_vectorizer
-
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(
-            f"Không tìm thấy vectorizer đã fit tại: {path}\n"
-            f"Hãy chạy fit_reference_vectorizer() trước (chỉ 1 lần)."
-        )
-
-    with open(path, "rb") as f:
+def load_vectorizer(path=VECTORIZER_PATH, use_cache=True):
+    path = Path(path).resolve()
+    stat = path.stat()
+    key = str(path), stat.st_mtime_ns, stat.st_size
+    if use_cache and key in _vectorizer_cache:
+        return _vectorizer_cache[key]
+    with path.open('rb') as f:
         vectorizer = pickle.load(f)
-
     if use_cache:
-        _cached_vectorizer = vectorizer
-
+        _vectorizer_cache.clear()
+        _vectorizer_cache[key] = vectorizer
     return vectorizer
 
 
-# ============================================================
-# BƯỚC 3 — LỌC (hàm chính của Tầng 1 trong pipeline)
-# ============================================================
-
-def tfidf_filter(
-    sentence_a: str,
-    sentence_b: str,
-    vectorizer: TfidfVectorizer = None,
-    threshold: float = DEFAULT_THRESHOLD,
-) -> dict:
-    """
-    Hàm CHÍNH của Tầng 1 — đúng vai trò trong pipeline CaTE-X.
-
-    Input : 2 câu cụ thể (đã có sẵn, KHÔNG tìm kiếm trong corpus)
-    Output: dict gồm similarity + quyết định dừng ("stop") hay
-            tiếp tục ("continue") sang Tầng 2
-    """
+def tfidf_filter_batch(pairs, vectorizer=None, threshold=None, batch_size=1024):
+    """Lexical scores only. The legacy threshold does not cause early exits."""
+    pairs = list(pairs)
+    if batch_size < 1:
+        raise ValueError('batch_size must be positive')
+    for pair in pairs:
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2 or any(not isinstance(s,str) or not s.strip() for s in pair):
+            raise ValueError('Each pair must contain two non-empty strings')
+    if not pairs:
+        return pd.DataFrame(columns=['sentence_a','sentence_b','similarity','decision'])
     if vectorizer is None:
         vectorizer = load_vectorizer()
-
-    if not sentence_a or not str(sentence_a).strip() or not sentence_b or not str(sentence_b).strip():
-        return {"similarity": 0.0, "decision": "stop", "reason": "một trong hai câu rỗng"}
-
-    vectors = vectorizer.transform([str(sentence_a), str(sentence_b)])
-    # 2 vector đã chuẩn hóa L2 sẵn (TfidfVectorizer mặc định norm='l2'),
-    # nên dot product = cosine similarity, không cần gọi hàm riêng
-    similarity = float(vectors[0].multiply(vectors[1]).sum())
-
-    decision = "continue" if similarity >= threshold else "stop"
-
-    return {
-        "similarity": similarity,
-        "decision": decision,
-        "reason": None if decision == "continue" else f"similarity < {threshold}",
-    }
+    scores = []
+    for start in range(0, len(pairs), batch_size):
+        batch = pairs[start:start + batch_size]
+        a = vectorizer.transform([p[0] for p in batch])
+        b = vectorizer.transform([p[1] for p in batch])
+        scores.extend(np.asarray(a.multiply(b).sum(axis=1)).ravel().tolist())
+    return pd.DataFrame({'sentence_a':[p[0] for p in pairs], 'sentence_b':[p[1] for p in pairs],
+                         'similarity':scores, 'decision':'continue'})
 
 
-def tfidf_filter_batch(
-    pairs: list,
-    vectorizer: TfidfVectorizer = None,
-    threshold: float = DEFAULT_THRESHOLD,
-) -> pd.DataFrame:
-    """
-    Phiên bản xử lý HÀNG LOẠT — dùng khi cần lọc nhiều cặp câu cùng
-    lúc (ví dụ: đánh giá trên tập test với hàng trăm nghìn dòng).
-    Nhanh hơn nhiều so với gọi tfidf_filter() trong vòng lặp Python
-    từng dòng một, vì tận dụng phép toán vector hóa của scipy.
-
-    Tính cosine similarity TỪNG CẶP (row-wise), KHÔNG tính ma trận
-    N x N đầy đủ -> an toàn bộ nhớ kể cả với hàng triệu cặp (giống
-    kỹ thuật đã dùng trong build_triplet.py và run_eda.py).
-
-    Parameters
-    ----------
-    pairs : list các tuple (sentence_a, sentence_b)
-    """
-    if vectorizer is None:
-        vectorizer = load_vectorizer()
-
-    sentences_a = [str(p[0]) for p in pairs]
-    sentences_b = [str(p[1]) for p in pairs]
-
-    vectors_a = vectorizer.transform(sentences_a)
-    vectors_b = vectorizer.transform(sentences_b)
-
-    product = vectors_a.multiply(vectors_b)
-    similarities = np.asarray(product.sum(axis=1)).flatten()
-
-    decisions = np.where(similarities >= threshold, "continue", "stop")
-
-    return pd.DataFrame({
-        "sentence_a": sentences_a,
-        "sentence_b": sentences_b,
-        "similarity": similarities,
-        "decision": decisions,
-    })
+def tfidf_filter(sentence_a, sentence_b, vectorizer=None, threshold=None):
+    row = tfidf_filter_batch([(sentence_a,sentence_b)],vectorizer,batch_size=1).iloc[0]
+    return {'similarity':float(row.similarity), 'decision':'continue', 'score_type':'cosine', 'reason':None}
 
 
-if __name__ == "__main__":
-    # ---- Demo nhanh ----
-    # Bước fit (chỉ chạy 1 lần khi setup, bỏ comment khi cần):
-    # fit_reference_vectorizer(reference_sentences=[...danh sách câu tham chiếu...])
-
-    result = tfidf_filter(
-        "The economy grew rapidly last year.",
-        "Last year, the economy expanded quickly.",
-    )
-    print(result)
+if __name__ == '__main__':
+    import argparse
+    import sys
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    parser = argparse.ArgumentParser(description='Fit tier-1 TF-IDF on training text only')
+    parser.add_argument('--train', required=True, help='Triplet TRAIN CSV (never val/test)')
+    parser.add_argument('--output', default=str(VECTORIZER_PATH))
+    parser.add_argument('--max-sentences', type=int, default=200000)
+    args = parser.parse_args()
+    if args.max_sentences < 1:
+        parser.error('--max-sentences must be positive')
+    frame = pd.read_csv(args.train, usecols=['anchor','positive'])
+    texts = pd.concat([frame.anchor,frame.positive]).dropna().drop_duplicates()
+    texts = texts.sample(n=min(args.max_sentences,len(texts)),random_state=42)
+    fit_reference_vectorizer(texts,save_path=Path(args.output))

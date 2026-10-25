@@ -1,19 +1,7 @@
-"""
-pipeline/calibration.py
---------------------------
-Platt Scaling — chuyển similarity score (Tầng 1, 2, 3) thành xác
-suất THẬT SỰ có ý nghĩa thống kê, thay vì chỉ là độ đo khoảng cách
-hình học (đã giải thích chi tiết lý do cần bước này khi thiết kế
-output của hệ thống).
-
-CẦN 1 BỘ CALIBRATOR RIÊNG CHO MỖI TẦNG (1, 2, 3) — vì "tính chất"
-similarity của mỗi tầng khác nhau (TF-IDF khác SBERT pretrained khác
-SBERT fine-tuned). Tầng 4 KHÔNG cần calibration vì đã xuất ra xác
-suất chuẩn sẵn qua Binary Cross-Entropy + sigmoid.
-
-Đây là thành phần TÙY CHỌN (nice-to-have) — hệ thống vẫn hoạt động
-đúng mà không cần bước này, chỉ là "%" hiển thị ở Tầng 1-3 sẽ mang
-ý nghĩa "similarity score" thay vì "xác suất đã hiệu chỉnh".
+"""Optional single-score calibration experiments, separate from production fusion.
+Fit on held-out validation scores and assess calibration on untouched data.
+Sigmoid/BCE alone does not guarantee calibrated probabilities, including tier 4.
+Production uses fusion.py and displays its output as uncalibrated model scores.
 """
 
 import pickle

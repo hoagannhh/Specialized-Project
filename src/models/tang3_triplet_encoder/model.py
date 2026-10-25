@@ -23,6 +23,12 @@ classifier học cách "đọc" [CLS] theo mục đích phân loại cụ thể)
     hiệu quả hơn chỉ dùng [CLS] cho bài toán similarity.
 """
 
+from pathlib import Path
+import sys
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from src.models.runtime import make_encoder
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -33,7 +39,8 @@ except ImportError:
     AutoModel = None
 
 
-DEFAULT_PRETRAINED_NAME = "bert-base-multilingual-cased"
+from src.models.runtime import EMBEDDING_MODEL
+DEFAULT_PRETRAINED_NAME = EMBEDDING_MODEL
 
 
 class BiEncoder(nn.Module):
@@ -47,13 +54,13 @@ class BiEncoder(nn.Module):
     chung trọng số" mà không cần thiết kế gì đặc biệt thêm.
     """
 
-    def __init__(self, pretrained_name: str = DEFAULT_PRETRAINED_NAME):
+    def __init__(self, pretrained_name: str = DEFAULT_PRETRAINED_NAME, encoder_config=None):
         super().__init__()
 
         if AutoModel is None:
             raise ImportError("Chưa cài thư viện transformers. Chạy: pip install transformers")
 
-        self.encoder = AutoModel.from_pretrained(pretrained_name)
+        self.encoder = make_encoder(pretrained_name, encoder_config)
 
     def _mean_pooling(self, token_embeddings: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         """

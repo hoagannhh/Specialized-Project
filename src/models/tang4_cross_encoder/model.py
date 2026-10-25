@@ -13,6 +13,12 @@ tokenizer(sentence_1, sentence_2, ...) — tự thêm [CLS]/[SEP]/
 token_type_ids đúng chuẩn BERT, không cần tự ghép tay.
 """
 
+from pathlib import Path
+import sys
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from src.models.runtime import make_encoder
+
 import torch
 import torch.nn as nn
 
@@ -36,13 +42,13 @@ class CrossEncoderModel(nn.Module):
     ổn định số học hơn tự gọi sigmoid() rồi mới tính BCE thường).
     """
 
-    def __init__(self, pretrained_name: str = DEFAULT_PRETRAINED_NAME, dropout: float = 0.1):
+    def __init__(self, pretrained_name: str = DEFAULT_PRETRAINED_NAME, dropout: float = 0.1, encoder_config=None):
         super().__init__()
 
         if AutoModel is None:
             raise ImportError("Chưa cài thư viện transformers. Chạy: pip install transformers")
 
-        self.encoder = AutoModel.from_pretrained(pretrained_name)
+        self.encoder = make_encoder(pretrained_name, encoder_config)
         hidden_size = self.encoder.config.hidden_size
 
         self.dropout = nn.Dropout(dropout)
@@ -61,11 +67,10 @@ class CrossEncoderModel(nn.Module):
                 trực tiếp với BCEWithLogitsLoss lúc train, hoặc qua
                 sigmoid() lúc suy luận để ra xác suất.
         """
-        outputs = self.encoder(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-        )
+        inputs = dict(input_ids=input_ids, attention_mask=attention_mask)
+        if token_type_ids is not None:
+            inputs['token_type_ids'] = token_type_ids
+        outputs = self.encoder(**inputs)
 
         cls_embedding = outputs.last_hidden_state[:, 0, :]
         cls_embedding = self.dropout(cls_embedding)

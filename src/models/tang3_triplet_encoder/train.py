@@ -10,6 +10,11 @@ Cách chạy:
 """
 
 import argparse
+import sys
+from pathlib import Path
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from src.models.runtime import seed_everything, save_bundle, restore_best, select_threshold
 import os
 
 import numpy as np
@@ -21,7 +26,7 @@ try:
 except ImportError as e:
     raise ImportError(f"Thiếu thư viện: {e}. Chạy: pip install torch transformers")
 
-from model import BiEncoder, TripletLoss, load_tokenizer, DEFAULT_PRETRAINED_NAME
+from src.models.tang3_triplet_encoder.model import BiEncoder, TripletLoss, load_tokenizer, DEFAULT_PRETRAINED_NAME
 
 
 # ============================================================
@@ -107,13 +112,19 @@ def train(
     margin: float = 0.5,
     num_epochs: int = 3,
     patience: int = 2,
+    seed: int = 42,
 ):
+    if min(batch_size, max_length, num_epochs, patience) < 1:
+        raise ValueError('batch_size, max_length, num_epochs and patience must be positive')
+    seed_everything(seed)
     os.makedirs(output_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Thiết bị: {device}")
 
     df_train = pd.read_csv(train_csv)
     df_val = pd.read_csv(val_csv)
+    if df_train.empty or df_val.empty:
+        raise ValueError('Training and validation datasets must not be empty')
     print(f"Train: {len(df_train):,} triplet | Val: {len(df_val):,} triplet")
 
     tokenizer = load_tokenizer(pretrained_name)
@@ -128,7 +139,7 @@ def train(
     loss_fn = TripletLoss(margin=margin)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-    best_val_accuracy = 0.0
+    best_val_accuracy = float("-inf")
     epochs_without_improvement = 0
 
     for epoch in range(1, num_epochs + 1):
@@ -144,6 +155,7 @@ def train(
 
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
             total_loss += loss.item()
@@ -159,7 +171,7 @@ def train(
             epochs_without_improvement = 0
 
             checkpoint_path = os.path.join(output_dir, "tang3_best.pt")
-            torch.save(model.state_dict(), checkpoint_path)
+            save_bundle(model, tokenizer, output_dir, 3, pretrained_name, max_length, seed=seed, margin=margin, epoch=epoch, val_accuracy=float(val_accuracy))
             print(f"  -> Lưu checkpoint tốt nhất: {checkpoint_path}")
         else:
             epochs_without_improvement += 1
@@ -172,10 +184,13 @@ def train(
     # Lưu tokenizer cùng checkpoint để inference.py dùng lại đúng
     tokenizer.save_pretrained(output_dir)
 
+    restore_best(model, output_dir, 3)
     return model
 
 
 if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser()
     parser.add_argument("--train", required=True)
     parser.add_argument("--val", required=True)
@@ -187,11 +202,12 @@ if __name__ == "__main__":
     parser.add_argument("--margin", type=float, default=0.5)
     parser.add_argument("--num-epochs", type=int, default=3)
     parser.add_argument("--patience", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     train(
         train_csv=args.train, val_csv=args.val, output_dir=args.output_dir,
         pretrained_name=args.pretrained_name, max_length=args.max_length,
         batch_size=args.batch_size, learning_rate=args.learning_rate,
-        margin=args.margin, num_epochs=args.num_epochs, patience=args.patience,
+        margin=args.margin, num_epochs=args.num_epochs, patience=args.patience, seed=args.seed,
     )

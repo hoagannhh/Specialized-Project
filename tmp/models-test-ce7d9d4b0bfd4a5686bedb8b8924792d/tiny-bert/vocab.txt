@@ -1,0 +1,14 @@
+[PAD]
+[UNK]
+[CLS]
+[SEP]
+[MASK]
+cat
+dog
+runs
+walks
+the
+a
+bird
+flies
+.

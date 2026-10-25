@@ -14,7 +14,7 @@ Mỗi hàm check_* tương ứng với 1 mục trong checklist đã thống nh�
               các tập cross-eval (PADBen Task 4, 5)
 
 Cách chạy (ví dụ):
-    python src/data_prep/run_eda.py --tang0-dir data/splits --tang0-prefix merged_tang0 \\
+    python src/data_prep/run_eda.py --tang0-train data/splits/tang0_train.csv --tang0-val data/splits/tang0_val.csv --tang0-test data/splits/tang0_test.csv \\
         --triplet data/splits/triplet_data_train.csv \\
         --pairwise data/splits/pairwise_labeled_train.csv \\
         --output-dir evaluation/eda_results

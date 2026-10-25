@@ -1,0 +1,68 @@
+group_id,sentence,split,label,source
+51,Alternate topic number 51,test,1,humarin
+81,Original topic number 81,test,0,humarin
+28,Original topic number 28,test,0,humarin
+55,Original topic number 55,test,0,humarin
+73,Reworded topic number 73,test,1,humarin
+59,Alternate topic number 59,test,1,humarin
+124,human example 22,test,0,padben_task2
+31,Original topic number 31,test,0,humarin
+131,human example 29,test,0,padben_task2
+71,Original topic number 71,test,0,humarin
+24,Reworded topic number 24,test,1,humarin
+131,aipara example 29,test,1,padben_task1
+28,Alternate topic number 28,test,1,humarin
+10,Original topic number 10,test,0,humarin
+124,generated example 22,test,1,padben_task2
+50,Alternate topic number 50,test,1,humarin
+74,Alternate topic number 74,test,1,humarin
+50,Original topic number 50,test,0,humarin
+60,Reworded topic number 60,test,1,humarin
+31,Alternate topic number 31,test,1,humarin
+85,Alternate topic number 85,test,1,humarin
+10,Reworded topic number 10,test,1,humarin
+71,Alternate topic number 71,test,1,humarin
+60,Alternate topic number 60,test,1,humarin
+38,Reworded topic number 38,test,1,humarin
+73,Alternate topic number 73,test,1,humarin
+73,Original topic number 73,test,0,humarin
+85,Reworded topic number 85,test,1,humarin
+24,Original topic number 24,test,0,humarin
+85,Original topic number 85,test,0,humarin
+50,Reworded topic number 50,test,1,humarin
+51,Original topic number 51,test,0,humarin
+74,Reworded topic number 74,test,1,humarin
+38,Original topic number 38,test,0,humarin
+131,first example 29,test,1,padben_task3
+124,first example 22,test,1,padben_task3
+75,Original topic number 75,test,0,humarin
+28,Reworded topic number 28,test,1,humarin
+24,Alternate topic number 24,test,1,humarin
+19,Alternate topic number 19,test,1,humarin
+75,Alternate topic number 75,test,1,humarin
+60,Original topic number 60,test,0,humarin
+38,Alternate topic number 38,test,1,humarin
+131,generated example 29,test,1,padben_task2
+75,Reworded topic number 75,test,1,humarin
+55,Reworded topic number 55,test,1,humarin
+31,Reworded topic number 31,test,1,humarin
+71,Reworded topic number 71,test,1,humarin
+95,Reworded topic number 95,test,1,humarin
+18,Original topic number 18,test,0,humarin
+18,Reworded topic number 18,test,1,humarin
+19,Original topic number 19,test,0,humarin
+95,Alternate topic number 95,test,1,humarin
+59,Reworded topic number 59,test,1,humarin
+51,Reworded topic number 51,test,1,humarin
+81,Alternate topic number 81,test,1,humarin
+19,Reworded topic number 19,test,1,humarin
+124,aipara example 22,test,1,padben_task1
+59,Original topic number 59,test,0,humarin
+18,Alternate topic number 18,test,1,humarin
+95,Original topic number 95,test,0,humarin
+124,humanpara example 22,test,0,padben_task1
+55,Alternate topic number 55,test,1,humarin
+10,Alternate topic number 10,test,1,humarin
+131,humanpara example 29,test,0,padben_task1
+74,Original topic number 74,test,0,humarin
+81,Reworded topic number 81,test,1,humarin

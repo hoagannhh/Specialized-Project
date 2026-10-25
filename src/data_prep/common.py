@@ -52,11 +52,10 @@ def _parse_paraphrase_list(raw_value):
         parsed = ast.literal_eval(raw_value)
         if isinstance(parsed, list):
             return parsed
-        # Trường hợp chỉ có 1 câu, không phải list
-        return [str(parsed)]
-    except (ValueError, SyntaxError):
-        # Nếu parse thất bại, coi như cả chuỗi là 1 câu paraphrase duy nhất
-        return [raw_value]
+        # Không biến dữ liệu lỗi thành câu huấn luyện
+        raise ValueError("paraphrases must be a serialized list")
+    except (ValueError, SyntaxError) as exc:
+        raise ValueError("Invalid serialized paraphrase list") from exc
 
 
 # def load_humarin_pairs(raw_path: str = HUMARIN_RAW_PATH) -> pd.DataFrame:

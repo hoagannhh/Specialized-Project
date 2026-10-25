@@ -54,6 +54,8 @@ evaluation/results/*
 !evaluation/eda_results/.gitkeep
 !evaluation/results/.gitkeep
 
+output/*
+
 # Notebook output (giữ code, bỏ output để diff/review dễ hơn)
 # Nếu muốn giữ cả output đã chạy, comment dòng dưới
 # notebooks/*.ipynb filter=strip-notebook-output

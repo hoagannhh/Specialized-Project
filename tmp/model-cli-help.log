@@ -1,0 +1,19 @@
+usage: train.py [-h] --train TRAIN --val VAL [--output-dir OUTPUT_DIR]
+                [--pretrained-name PRETRAINED_NAME] [--max-length MAX_LENGTH]
+                [--batch-size BATCH_SIZE] [--learning-rate LEARNING_RATE]
+                [--margin MARGIN] [--num-epochs NUM_EPOCHS]
+                [--patience PATIENCE] [--seed SEED]
+
+options:
+  -h, --help            show this help message and exit
+  --train TRAIN
+  --val VAL
+  --output-dir OUTPUT_DIR
+  --pretrained-name PRETRAINED_NAME
+  --max-length MAX_LENGTH
+  --batch-size BATCH_SIZE
+  --learning-rate LEARNING_RATE
+  --margin MARGIN
+  --num-epochs NUM_EPOCHS
+  --patience PATIENCE
+  --seed SEED

@@ -804,4 +804,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit("Legacy pipeline retired. Run: python src/data_prep/prepare_datasets.py --strategy mixed")

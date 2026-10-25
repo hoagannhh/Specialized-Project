@@ -1,334 +1,139 @@
-"""
-pipeline/single_file_pipeline.py
------------------------------------
-Hệ thống mở rộng: nhận 1 file văn bản duy nhất, tự động:
-    1. Đọc file + tách câu
-    2. Lọc sơ bộ bằng Bước 0 (chỉ câu "đáng nghi" mới đi tiếp)
-    3. Tìm nguồn nghi ngờ qua Web Search
-    4. Trích xuất nội dung trang web, tìm câu khớp nhất trong trang đó
-    5. Đưa cặp (câu nghi ngờ, câu nguồn tìm được) qua cascade_pipeline
-       (Tầng 1-5, KHÔNG đổi)
-    6. Tổng hợp kết quả, xuất file HTML có highlight
-
-Xem sơ đồ "Kiến trúc hệ thống mở rộng CaTE-X" đã thống nhất.
-
-Cách chạy:
-    python src/pipeline/single_file_pipeline.py \\
-        --input path/to/document.docx \\
-        --output result_highlighted.html
-"""
-
-import importlib
-import re
+"""Two retrieval modes; every candidate uses the same complete five-tier pipeline."""
 import sys
 from pathlib import Path
+if __package__ in (None,''):
+    sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
+from collections import Counter
+from src.utils import config
+from src.document_processing.file_reader import read_document
+from src.document_processing.sentence_splitter import split_sentences_with_position
+from src.retrieval.candidates import select_candidates
 
-_SRC_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_SRC_DIR / "utils"))
+LABELS={'skipped_budget':'chưa kiểm tra nguồn (chế độ tiết kiệm)',
+        'search_failed':'tìm kiếm bị lỗi','no_source':'chưa tìm thấy nguồn',
+        'extraction_failed':'không đọc được nguồn','no_candidate':'chưa tìm thấy đoạn ứng viên',
+        'retrieval_failed':'lỗi chọn đoạn ứng viên','model_failed':'lỗi phân tích cặp câu',
+        'incomplete':'chưa kiểm tra đủ các nguồn ứng viên'}
 
-from config import ensure_all_dirs, check_required_keys, TANG0_CHECKPOINT_DIR, WEB_SEARCH_MAX_RESULTS
-from logger import get_logger
-
-logger = get_logger(__name__)
-
-
-# ============================================================
-# LOAD MODULE CẦN THIẾT (dùng lại kỹ thuật từ cascade_pipeline.py để
-# xử lý đúng các file trùng tên giữa các tầng — xem giải thích chi
-# tiết trong cascade_pipeline.py)
-# ============================================================
-
-def _load_tier_module(tier_dir: Path, module_filename: str = "inference"):
-    tier_dir_str = str(tier_dir)
-    sys.path.insert(0, tier_dir_str)
-    try:
-        for name in ["model", module_filename]:
-            sys.modules.pop(name, None)
-        module = importlib.import_module(module_filename)
-    finally:
-        sys.path.remove(tier_dir_str)
-    return module
-
-
-def _load_modules():
-    """
-    Load trễ (lazy) — chỉ gọi khi thực sự cần khởi tạo pipeline, để
-    các hàm thuần túy (read_file, split_sentences...) trong file này
-    vẫn import/test được ngay cả khi CHƯA cài torch/sentence-transformers.
-    """
-    tang0_inference = _load_tier_module(_SRC_DIR / "models" / "tang0_style_classifier", "inference")
-    web_search = _load_tier_module(_SRC_DIR / "retrieval", "web_search")
-    extract_page_text = _load_tier_module(_SRC_DIR / "retrieval", "extract_page_text")
-    cascade_module = _load_tier_module(_SRC_DIR / "pipeline", "cascade_pipeline")
-    return tang0_inference, web_search, extract_page_text, cascade_module
-
-
-# ============================================================
-# BƯỚC 1 — ĐỌC FILE (.txt / .docx / .pdf)
-# ============================================================
-
-def read_file(file_path: str) -> str:
-    """Đọc nội dung văn bản từ file .txt, .docx hoặc .pdf."""
-    file_path = Path(file_path)
-    suffix = file_path.suffix.lower()
-
-    if suffix == ".txt":
-        return file_path.read_text(encoding="utf-8", errors="ignore")
-
-    elif suffix == ".docx":
-        try:
-            import docx
-        except ImportError:
-            raise ImportError("Chưa cài python-docx. Chạy: pip install python-docx")
-        document = docx.Document(str(file_path))
-        return "\n".join(p.text for p in document.paragraphs)
-
-    elif suffix == ".pdf":
-        try:
-            import pdfplumber
-        except ImportError:
-            raise ImportError("Chưa cài pdfplumber. Chạy: pip install pdfplumber")
-        text_parts = []
-        with pdfplumber.open(str(file_path)) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text_parts.append(page_text)
-        return "\n".join(text_parts)
-
-    else:
-        raise ValueError(f"Định dạng file không hỗ trợ: {suffix}. Chỉ hỗ trợ .txt, .docx, .pdf")
-
-
-# ============================================================
-# BƯỚC 2 — TÁCH CÂU
-# ============================================================
-
-_SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?…])\s+(?=[A-ZÀ-Ỹ0-9\"'])")
-
-
-def split_sentences(text: str, min_length: int = 15) -> list:
-    """
-    Tách văn bản thành danh sách câu bằng regex dựa trên dấu câu kết
-    thúc (., !, ?, …) theo sau bởi khoảng trắng và chữ hoa/số — hỗ
-    trợ cả tiếng Việt (có dấu) và tiếng Anh.
-
-    LƯU Ý: đây là bộ tách câu ĐƠN GIẢN, có thể tách sai với câu chứa
-    viết tắt ("T.S. Nguyễn Văn A", "Mr. Smith") hoặc số thập phân
-    ("giá 3.5 triệu"). Nếu cần độ chính xác cao hơn, cân nhắc dùng
-    thư viện chuyên dụng (underthesea cho tiếng Việt, nltk.sent_tokenize
-    cho tiếng Anh).
-    """
-    text = re.sub(r"\s+", " ", text).strip()
-    if not text:
-        return []
-
-    raw_sentences = _SENTENCE_SPLIT_PATTERN.split(text)
-    sentences = [s.strip() for s in raw_sentences if len(s.strip()) >= min_length]
-
-    return sentences
-
-
-# ============================================================
-# BƯỚC 3 — TÌM CÂU KHỚP NHẤT TRONG 1 TRANG WEB (TF-IDF local, nhẹ)
-# ============================================================
-
-def find_best_matching_sentence(query_sentence: str, page_text: str) -> str:
-    """
-    Trong nội dung 1 trang web đã trích xuất, tìm CÂU nào khớp nhất
-    với query_sentence.
-
-    LƯU Ý: đây là TF-IDF fit RIÊNG trên các câu của TRANG NÀY (dùng
-    min_df=1 vì corpus nhỏ, chỉ 1 trang) — khác hoàn toàn với Tầng 1
-    (dùng vectorizer dùng chung, fit sẵn trên corpus tham chiếu lớn).
-    Đây là bài toán khác: "tìm câu ứng viên trong phạm vi 1 trang",
-    không phải "lọc 1 cặp câu cho sẵn".
-    """
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.metrics.pairwise import cosine_similarity
-
-    page_sentences = split_sentences(page_text)
-    if not page_sentences:
-        return ""
-
-    try:
-        vectorizer = TfidfVectorizer(min_df=1)
-        all_texts = [query_sentence] + page_sentences
-        tfidf_matrix = vectorizer.fit_transform(all_texts)
-    except ValueError:
-        # Trường hợp hiếm: toàn bộ câu đều là stopword/rỗng sau xử lý
-        return page_sentences[0]
-
-    query_vector = tfidf_matrix[0]
-    candidate_vectors = tfidf_matrix[1:]
-
-    similarities = cosine_similarity(query_vector, candidate_vectors).flatten()
-    best_idx = int(similarities.argmax())
-
-    return page_sentences[best_idx]
-
-
-# ============================================================
-# BƯỚC 4 — XUẤT FILE HTML HIGHLIGHT
-# ============================================================
-
-def export_highlighted_html(process_result: dict, output_path: str, original_sentences: list = None):
-    """
-    Xuất file HTML, highlight các câu nghi ngờ theo mức độ (đỏ/cam/
-    vàng theo ngưỡng xác suất, đúng thiết kế đã thống nhất).
-
-    Tách riêng khỏi class SingleFilePipeline để có thể TEST ĐỘC LẬP
-    bằng dữ liệu giả lập, không cần chạy qua toàn bộ model AI thật.
-    """
-    results_by_sentence = {r["sentence"]: r for r in process_result["results"]}
-
-    if original_sentences is None:
-        original_text = read_file(process_result["file_path"])
-        original_sentences = split_sentences(original_text)
-
-    html_parts = [
-        "<!DOCTYPE html><html><head><meta charset='utf-8'>",
-        "<style>",
-        "body { font-family: sans-serif; max-width: 800px; margin: 40px auto; line-height: 1.8; }",
-        ".high { background-color: #ffcccc; }",
-        ".medium { background-color: #ffe0b3; }",
-        ".low { background-color: #fff9cc; }",
-        ".tooltip { font-size: 0.85em; color: #555; display: block; margin: 4px 0 12px 0; }",
-        "</style></head><body>",
-        f"<h2>Kết quả kiểm tra: {Path(process_result['file_path']).name}</h2>",
-        f"<p>Tổng số câu: {process_result['total_sentences']} | "
-        f"Số câu nghi ngờ: {process_result['suspicious_sentences']}</p><hr>",
-    ]
-
-    for sentence in original_sentences:
-        result = results_by_sentence.get(sentence)
-
-        if result is None or result.get("probability") is None:
-            html_parts.append(f"<p>{sentence}</p>")
-            continue
-
-        prob = result["probability"]
-        css_class = "high" if prob >= 0.85 else "medium" if prob >= 0.6 else "low"
-
-        tooltip = (
-            f"Nguồn: {result.get('source_url', 'N/A')} | "
-            f"Xác suất: {prob:.1%} | Nhãn: {result['label']}"
-        )
-        if result.get("explanation"):
-            tooltip += f" | Giải thích: {result['explanation']}"
-
-        html_parts.append(f"<p><span class='{css_class}'>{sentence}</span>")
-        html_parts.append(f"<span class='tooltip'>{tooltip}</span></p>")
-
-    html_parts.append("</body></html>")
-
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("\n".join(html_parts), encoding="utf-8")
-
-    logger.info(f"Đã xuất file highlight: {output_path}")
-    return output_path
-
-
-# ============================================================
-# PIPELINE CHÍNH (cần model AI thật — torch/sentence-transformers)
-# ============================================================
 
 class SingleFilePipeline:
-    def __init__(
-        self,
-        tang0_checkpoint_dir: str = str(TANG0_CHECKPOINT_DIR),
-        max_search_results: int = WEB_SEARCH_MAX_RESULTS,
-        enable_tang5: bool = False,
-    ):
-        self.tang0_checkpoint_dir = tang0_checkpoint_dir
-        self.max_search_results = max_search_results
+    def __init__(self,mode='full',tang0_checkpoint_dir=config.TANG0_CHECKPOINT_DIR,
+                 max_search_results=None,candidates_per_page=None,enable_tang5=True,
+                 tang5_provider=None,fusion_path=config.FUSION_PATH,
+                 classifier=None,search=None,fetch=None,cascade=None,semantic_scorer=None):
+        if mode not in ('full','economy'):raise ValueError('mode must be full or economy')
+        if not enable_tang5:raise ValueError('Both modes require all five tiers')
+        self.mode=mode
+        self.max_search_results=max_search_results if max_search_results is not None else (5 if mode=='full' else 3)
+        self.top_k=candidates_per_page if candidates_per_page is not None else (3 if mode=='full' else 1)
+        if not 1<=self.max_search_results<=10 or self.top_k<1:raise ValueError('Invalid retrieval budget')
+        if classifier is None:
+            from src.models.tang0_style_classifier.inference import predict_batch
+            classifier=lambda sentences:predict_batch(sentences,tang0_checkpoint_dir).to_dict('records')
+        if search is None:
+            config.check_required_keys(require_web_search=True)
+            from src.retrieval.web_search import search_web
+            search=search_web
+        if fetch is None:
+            from src.retrieval.extract_page_text import fetch_and_extract_text
+            fetch=fetch_and_extract_text
+        if cascade is None:
+            from src.pipeline.cascade_pipeline import CaTEXPipeline
+            cascade=CaTEXPipeline(tang5_provider=tang5_provider,fusion_path=fusion_path)
+        self.classifier,self.search,self.fetch,self.cascade=classifier,search,fetch,cascade
+        self.semantic_scorer=semantic_scorer or cascade.semantic_scores
 
-        check_required_keys(require_web_search=True, require_tang5=enable_tang5)
-        ensure_all_dirs()
+    def process_file(self,file_path):
+        document=read_document(file_path)
+        return self.process_document(document)
 
-        (self._tang0_inference, self._web_search,
-         self._extract_page_text, self._cascade_module) = _load_modules()
-
-        self.cascade_pipeline = self._cascade_module.CaTEXPipeline(
-            enable_tang5=enable_tang5,
-            verbose=False,
-        )
-
-    def process_file(self, file_path: str) -> dict:
-        """
-        Xử lý toàn bộ 1 file, trả về kết quả chi tiết cho từng câu
-        nghi ngờ kèm thống kê tổng quan.
-        """
-        logger.info(f"Đang đọc file: {file_path}")
-        text = read_file(file_path)
-
-        sentences = split_sentences(text)
-        logger.info(f"Tách được {len(sentences)} câu")
-
-        results = []
-
-        for i, sentence in enumerate(sentences):
-            logger.info(f"[{i + 1}/{len(sentences)}] Đang xử lý: {sentence[:60]}...")
-
-            tang0_result = self._tang0_inference.predict_sentence(
-                sentence, checkpoint_dir=self.tang0_checkpoint_dir
-            )
-
-            if tang0_result["decision"] == "skip":
-                continue  # Không đáng nghi -> bỏ qua, KHÔNG tốn Web Search
-
-            search_results = self._web_search.search_web(sentence, max_results=self.max_search_results)
-
-            if not search_results:
-                results.append({
-                    "sentence": sentence, "tang0_probability": tang0_result["probability"],
-                    "source_url": None, "label": "không tìm thấy nguồn", "probability": None,
-                })
-                continue
-
-            best_result = None
-            for search_item in search_results:
-                page_result = self._extract_page_text.fetch_and_extract_text(search_item["url"])
-                if not page_result["success"]:
-                    continue
-
-                candidate_sentence = find_best_matching_sentence(sentence, page_result["text"])
-                if not candidate_sentence:
-                    continue
-
-                pipeline_result = self.cascade_pipeline.predict(sentence, candidate_sentence)
-
-                if best_result is None or pipeline_result["probability"] > best_result["probability"]:
-                    best_result = {
-                        "sentence": sentence, "tang0_probability": tang0_result["probability"],
-                        "source_url": search_item["url"], "matched_source_sentence": candidate_sentence,
-                        "label": pipeline_result["label"], "probability": pipeline_result["probability"],
-                        "explanation": pipeline_result.get("explanation"),
-                    }
-
-            results.append(best_result or {
-                "sentence": sentence, "tang0_probability": tang0_result["probability"],
-                "source_url": None, "label": "không trích xuất được nội dung nguồn", "probability": None,
-            })
-
-        return {
-            "file_path": file_path,
-            "total_sentences": len(sentences),
-            "suspicious_sentences": len(results),
-            "results": results,
-        }
+    def process_document(self,document):
+        text=document['text'];spans=[]
+        for block in document.get('paragraph_ranges') or [{'start':0,'end':len(text)}]:
+            for span in split_sentences_with_position(text[block['start']:block['end']]):
+                spans.append({**span,'start':span['start']+block['start'],'end':span['end']+block['start']})
+        if not spans:raise ValueError('Không có câu đọc được')
+        predictions=self.classifier([s['sentence'] for s in spans])
+        if len(predictions)!=len(spans):raise ValueError('Wrong number of step-0 predictions')
+        results=[];search_cache={};page_cache={};pair_cache={}
+        for sentence_id,(span,prediction) in enumerate(zip(spans,predictions)):
+            record={**span,'sentence_id':sentence_id,'tang0_probability':float(prediction['probability']),
+                    'probability':None,'source_url':None,'status':None,'errors':[],'evidence':[]}
+            if self.mode=='economy' and prediction['decision']=='skip':
+                record['status']='skipped_budget';record['label']=LABELS[record['status']];results.append(record);continue
+            query=span['sentence']
+            if query not in search_cache:search_cache[query]=self.search(query,max_results=self.max_search_results)
+            response=search_cache[query]
+            if response['status']!='ok':
+                record['status']='no_source' if response['status']=='no_results' else 'search_failed'
+                record['errors']=[response.get('error')] if response.get('error') else []
+            else:
+                extracted=0;candidate_count=0;successful=[]
+                for item in response['items']:
+                    url=item['url']
+                    if url not in page_cache:page_cache[url]=self.fetch(url)
+                    page=page_cache[url]
+                    if not page['success']:
+                        record['errors'].append({'stage':'extract','url':url,'error':page.get('error')});continue
+                    extracted+=1
+                    try:candidates=select_candidates(query,page['text'],self.semantic_scorer,self.top_k)
+                    except Exception as exc:
+                        record['errors'].append({'stage':'retrieve','url':url,'error':type(exc).__name__});continue
+                    candidate_count+=len(candidates)
+                    for candidate in candidates:
+                        key=query,candidate['sentence']
+                        try:
+                            if key not in pair_cache:pair_cache[key]=self.cascade.predict(*key)
+                            pair=pair_cache[key]
+                            successful.append({**pair,'source_url':url,'source_title':item.get('title',''),
+                                'matched_source_sentence':candidate['sentence'],
+                                'source_start':candidate['start'],'source_end':candidate['end']})
+                        except Exception as exc:
+                            record['errors'].append({'stage':'model','url':url,'error':type(exc).__name__})
+                if successful:
+                    successful.sort(key=lambda r:r['probability'],reverse=True)
+                    best=successful[0]
+                    record.update({k:v for k,v in best.items() if k not in ('status','errors')})
+                    record['status']=best['decision']
+                    if record['status']=='checked_negative' and record['errors']:record['status']='incomplete'
+                    record['evidence']=successful
+                    record['complete']=not record['errors'] and all(r.get('complete',False) for r in successful)
+                elif not extracted:record['status']='extraction_failed'
+                elif any(e['stage']=='retrieve' for e in record['errors']):record['status']='retrieval_failed'
+                elif candidate_count:record['status']='model_failed'
+                else:record['status']='no_candidate'
+            record['label']=LABELS.get(record['status'],record.get('label','chưa đủ bằng chứng'))
+            results.append(record)
+        counts=dict(Counter(r['status'] for r in results))
+        return {'file_path':document['file_path'],'format':document.get('format','txt'),
+                'original_text':text,'paragraph_ranges':document.get('paragraph_ranges',[]),
+                'warnings':document.get('warnings',[]),'mode':self.mode,
+                'total_sentences':len(spans),'checked_sentences':sum(bool(r['evidence']) for r in results),
+                'suspicious_sentences':counts.get('suspicious',0),'status_counts':counts,'results':results}
 
 
-if __name__ == "__main__":
-    import argparse
+def main():
+    import argparse,json
+    if hasattr(sys.stdout,'reconfigure'):sys.stdout.reconfigure(encoding='utf-8')
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--input',required=True)
+    parser.add_argument('--output',default='output/report.html')
+    parser.add_argument('--mode',choices=['full','economy'],default='full')
+    parser.add_argument('--fusion',default=str(config.FUSION_PATH))
+    parser.add_argument('--provider',choices=['openai','anthropic'],default=config.TANG5_PROVIDER)
+    args=parser.parse_args()
+    output=Path(args.output)
+    if output.suffix.lower() not in ('.html','.docx'):parser.error('--output must end in .html or .docx')
+    if output.resolve()==Path(args.input).resolve():parser.error('Output must differ from input')
+    result=SingleFilePipeline(mode=args.mode,tang5_provider=args.provider,fusion_path=args.fusion).process_file(args.input)
+    from src.document_processing.highlight_exporter import export_highlighted_html,export_highlighted_docx
+    output=Path(args.output)
+    if output.suffix.lower()=='.docx':export_highlighted_docx(result,output)
+    elif output.suffix.lower()=='.html':export_highlighted_html(result,output)
+    else:parser.error('--output must end in .html or .docx')
+    output.with_suffix('.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+    print(f'Report: {output.resolve()}')
+    print(result['status_counts'])
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="File cần kiểm tra (.txt/.docx/.pdf)")
-    parser.add_argument("--output", default="output_highlighted.html")
-    parser.add_argument("--enable-tang5", action="store_true")
-    args = parser.parse_args()
 
-    pipeline = SingleFilePipeline(enable_tang5=args.enable_tang5)
-    result = pipeline.process_file(args.input)
-    export_highlighted_html(result, args.output)
+if __name__=='__main__':main()

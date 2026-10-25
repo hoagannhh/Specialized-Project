@@ -1,214 +1,86 @@
-"""
-cascade_pipeline.py
----------------------
-Ghép toàn bộ 5 tầng của CaTE-X thành 1 pipeline suy luận hoàn chỉnh,
-CHẠY TUẦN TỰ với early-exit — đúng theo sơ đồ đã thống nhất:
-
-    Input (A, B)
-        -> Tầng 1 (TF-IDF)         [có thể dừng sớm]
-        -> Tầng 2 (SBERT pretrained) [có thể dừng sớm]
-        -> Tầng 3 (SBERT fine-tuned) [có thể dừng sớm nếu "confident"]
-        -> Tầng 4 (Cross-Encoder)   [luôn chạy nếu đến đây]
-        -> Tầng 5 (LLM-as-Judge)    [luôn chạy nếu đến đây, tùy chọn]
-        -> Output
-
-LƯU Ý QUAN TRỌNG (đã thống nhất nhiều lần): mỗi tầng nhận TRỰC TIẾP
-văn bản thô (A, B), KHÔNG nhận output đã biến đổi của tầng trước —
-các tầng chỉ phụ thuộc nhau về THỨ TỰ THỰC THI (control flow), không
-phụ thuộc nhau về DỮ LIỆU (data flow).
-"""
-
-import importlib
+"""Every candidate runs tiers 1–5. LLM explains but never changes the decision."""
 import sys
-import time
 from pathlib import Path
-
-# ============================================================
-# LOAD MODULE THEO TỪNG THƯ MỤC TẦNG (xử lý đúng import nội bộ)
-# ============================================================
-# LƯU Ý QUAN TRỌNG: nhiều tầng có file TRÙNG TÊN (Tầng 3 và Tầng 4
-# đều có "model.py" + "inference.py"; "inference.py" của mỗi tầng
-# còn có dòng "from model import ..." — tức import NỘI BỘ dựa vào
-# TÊN, không phải đường dẫn). Vì vậy:
-#
-#   - KHÔNG thể dùng sys.path.insert() thường (các thư mục tầng sẽ
-#     đụng độ tên "model"/"inference" lẫn nhau)
-#   - KHÔNG thể dùng importlib.util.spec_from_file_location() đơn
-#     thuần (đã thử — "from model import ..." bên trong inference.py
-#     sẽ báo lỗi "No module named 'model'", vì cách load này không
-#     thêm thư mục chứa file vào sys.path)
-#
-# Giải pháp đã kiểm chứng: với MỖI tầng, tạm thời thêm ĐÚNG thư mục
-# tầng đó vào đầu sys.path, xóa cache cũ (nếu có) của các tên
-# "model"/"inference" trong sys.modules, import bình thường (lúc này
-# "from model import ..." bên trong sẽ tìm đúng model.py CỦA TẦNG
-# ĐÓ), rồi gỡ thư mục khỏi sys.path ngay sau đó. Module đã import
-# được LƯU LẠI dưới biến riêng (ví dụ _tang3_inference), nên dù cache
-# sys.modules bị dọn cho tầng sau, tầng này vẫn dùng được bình thường
-# (không phụ thuộc cache sau khi đã lấy được tham chiếu module).
-
-_SRC_DIR = Path(__file__).resolve().parents[1]
-
-
-def _load_tier_module(tier_dir: Path, module_filename: str = "inference"):
-    tier_dir_str = str(tier_dir)
-    sys.path.insert(0, tier_dir_str)
-    try:
-        for name in ["model", module_filename]:
-            sys.modules.pop(name, None)
-        module = importlib.import_module(module_filename)
-    finally:
-        sys.path.remove(tier_dir_str)
-    return module
-
-
-_tang1_filter = _load_tier_module(_SRC_DIR / "models" / "tang1_tfidf", "filter")
-_tang2_encode = _load_tier_module(_SRC_DIR / "models" / "tang2_sbert_pretrained", "encode")
-_tang3_inference = _load_tier_module(_SRC_DIR / "models" / "tang3_triplet_encoder", "inference")
-_tang4_inference = _load_tier_module(_SRC_DIR / "models" / "tang4_cross_encoder", "inference")
-_tang5_call_api = _load_tier_module(_SRC_DIR / "models" / "tang5_llm_judge", "call_api")
+if __package__ in (None,''):
+    sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
+from time import perf_counter
+from src.utils import config
+from src.pipeline.fusion import ScoreFusion, features, artifact_signature
 
 
 class CaTEXPipeline:
-    """
-    Pipeline suy luận CaTE-X đầy đủ. Khởi tạo 1 LẦN (sẽ load/cache
-    tất cả model cần thiết), sau đó gọi predict() nhiều lần cho
-    từng cặp câu — tận dụng cache, không load lại model mỗi lần.
-    """
+    def __init__(self,tang1_vectorizer_path=config.TANG1_VECTORIZER_PATH,
+                 tang2_model_name=config.TANG2_MODEL_NAME,
+                 tang3_checkpoint_dir=config.TANG3_CHECKPOINT_DIR,
+                 tang4_checkpoint_dir=config.TANG4_CHECKPOINT_DIR,
+                 fusion_path=config.FUSION_PATH, enable_tang5=True,
+                 tang5_provider=None,tang5_api_key=None,verbose=False,
+                 scorers=None,judge=None,fusion=None):
+        if not enable_tang5:
+            raise ValueError('Production pipeline requires all five tiers. Use evaluation scripts for ablations.')
+        self.provider=tang5_provider or config.TANG5_PROVIDER
+        self.api_key=tang5_api_key
+        self.paths=(tang1_vectorizer_path,tang3_checkpoint_dir,tang4_checkpoint_dir,tang2_model_name)
+        self.model2_name=tang2_model_name
+        if fusion is None:
+            signature=artifact_signature(*self.paths)
+            fusion=ScoreFusion.load(fusion_path,signature)
+        self.fusion=fusion
+        self.scorers=scorers
+        self.judge=judge
+        if judge is None:
+            config.check_required_keys(require_tang5=True,provider=self.provider,api_key=self.api_key)
+        if scorers is not None and len(scorers)!=4:
+            raise ValueError('Exactly four scorers required')
 
-    def __init__(
-        self,
-        tang1_vectorizer_path: str = "data/models/tang1/tfidf_vectorizer.pkl",
-        tang2_model_name: str = "paraphrase-multilingual-MiniLM-L12-v2",
-        tang3_checkpoint_dir: str = "checkpoints/tang3",
-        tang4_checkpoint_dir: str = "checkpoints/tang4",
-        enable_tang5: bool = False,
-        tang5_provider: str = "openai",
-        tang5_api_key: str = None,
-        verbose: bool = True,
-    ):
-        self.tang1_vectorizer_path = tang1_vectorizer_path
-        self.tang2_model_name = tang2_model_name
-        self.tang3_checkpoint_dir = tang3_checkpoint_dir
-        self.tang4_checkpoint_dir = tang4_checkpoint_dir
-        self.enable_tang5 = enable_tang5
-        self.tang5_provider = tang5_provider
-        self.tang5_api_key = tang5_api_key
-        self.verbose = verbose
+    def _load_scorers(self):
+        if self.scorers is not None:return
+        from src.models.tang1_tfidf.filter import load_vectorizer,tfidf_filter
+        from src.models.tang2_sbert_pretrained.encode import load_model,sbert_filter
+        from src.models.tang3_triplet_encoder.inference import tang3_predict
+        from src.models.tang4_cross_encoder.inference import tang4_predict
+        vectorizer=load_vectorizer(self.paths[0])
+        self.model2,self.tokenizer2=load_model(self.model2_name)
+        self.scorers=[lambda a,b:tfidf_filter(a,b,vectorizer),
+                      lambda a,b:sbert_filter(a,b,self.model2,self.tokenizer2),
+                      lambda a,b:tang3_predict(a,b,self.paths[1]),
+                      lambda a,b:tang4_predict(a,b,self.paths[2])]
 
-        self._log("Khởi tạo pipeline — các model sẽ được load khi cần (lazy loading)")
+    def semantic_scores(self,query,candidates):
+        from src.models.tang2_sbert_pretrained.encode import load_model,sbert_filter_batch
+        model,tokenizer=load_model(self.model2_name)
+        return sbert_filter_batch([(query,c) for c in candidates],model,tokenizer).similarity.to_numpy()
 
-    def _log(self, message: str):
-        if self.verbose:
-            print(f"[CaTE-X] {message}")
-
-    def predict(self, sentence_a: str, sentence_b: str) -> dict:
-        """
-        Chạy pipeline đầy đủ cho 1 cặp câu, trả về kết quả cuối cùng
-        kèm "trace" (lịch sử các tầng đã chạy qua) để dễ debug/giải
-        thích trong demo.
-        """
-        trace = []
-        start_time = time.time()
-
-        # ---------------- TẦNG 1 ----------------
-        t1_start = time.time()
+    def predict(self,sentence_a,sentence_b):
+        """Compatibility order: suspect first, source second."""
+        if any(not isinstance(s,str) or not s.strip() for s in (sentence_a,sentence_b)):
+            raise ValueError('Both sentences must be non-empty')
+        self._load_scorers()
+        trace=[];start=perf_counter();results=[]
+        for tier,scorer in enumerate(self.scorers,1):
+            # Training pairs are (source/anchor, suspect/candidate); cross-encoder is not symmetric.
+            tick=perf_counter();result=scorer(sentence_b,sentence_a);results.append(result)
+            trace.append({'tang':tier,'status':'ok','result':result,'time_ms':(perf_counter()-tick)*1000})
+        values=features(results)
+        final=self.fusion.predict(values)
+        label='nghi vấn paraphrase' if final['decision']=='suspicious' else 'không phát hiện quan hệ paraphrase'
+        tick=perf_counter()
         try:
-            vectorizer = _tang1_filter.load_vectorizer(self.tang1_vectorizer_path)
-            t1_result = _tang1_filter.tfidf_filter(sentence_a, sentence_b, vectorizer=vectorizer)
-        except FileNotFoundError:
-            self._log("CẢNH BÁO: chưa có vectorizer Tầng 1, bỏ qua Tầng 1 (coi như continue)")
-            t1_result = {"similarity": None, "decision": "continue", "reason": "tang1_not_ready"}
-        trace.append({"tang": 1, "result": t1_result, "time_ms": (time.time() - t1_start) * 1000})
-        self._log(f"Tầng 1: similarity={t1_result.get('similarity')}, decision={t1_result['decision']}")
-
-        if t1_result["decision"] == "stop":
-            return self._finalize(trace, label="không đạo văn", probability=t1_result.get("similarity") or 0.0,
-                                   stopped_at="Tầng 1", start_time=start_time)
-
-        # ---------------- TẦNG 2 ----------------
-        t2_start = time.time()
-        t2_result = _tang2_encode.sbert_filter(sentence_a, sentence_b)
-        trace.append({"tang": 2, "result": t2_result, "time_ms": (time.time() - t2_start) * 1000})
-        self._log(f"Tầng 2: similarity={t2_result['similarity']:.3f}, decision={t2_result['decision']}")
-
-        if t2_result["decision"] == "stop":
-            return self._finalize(trace, label="không đạo văn", probability=t2_result["similarity"],
-                                   stopped_at="Tầng 2", start_time=start_time)
-        if t2_result["decision"] == "early_positive":
-            return self._finalize(trace, label="đạo văn (AI-paraphrase)", probability=t2_result["similarity"],
-                                   stopped_at="Tầng 2 (kết luận sớm)", start_time=start_time)
-
-        # ---------------- TẦNG 3 ----------------
-        t3_start = time.time()
-        t3_result = _tang3_inference.tang3_predict(
-            sentence_a, sentence_b, checkpoint_dir=self.tang3_checkpoint_dir
-        )
-        trace.append({"tang": 3, "result": t3_result, "time_ms": (time.time() - t3_start) * 1000})
-        self._log(f"Tầng 3: similarity={t3_result['similarity']:.3f}, decision={t3_result['decision']}")
-
-        if not t3_result["needs_tang4"]:
-            label = "đạo văn (AI-paraphrase)" if t3_result["similarity"] >= 0.5 else "không đạo văn"
-            return self._finalize(trace, label=label, probability=t3_result["similarity"],
-                                   stopped_at="Tầng 3 (confident)", start_time=start_time)
-
-        # ---------------- TẦNG 4 ----------------
-        t4_start = time.time()
-        t4_result = _tang4_inference.tang4_predict(
-            sentence_a, sentence_b, checkpoint_dir=self.tang4_checkpoint_dir
-        )
-        trace.append({"tang": 4, "result": t4_result, "time_ms": (time.time() - t4_start) * 1000})
-        self._log(f"Tầng 4: probability={t4_result['probability']:.3f}, label={t4_result['label']}")
-
-        final_label = t4_result["label"]
-        final_probability = t4_result["probability"]
-
-        # ---------------- TẦNG 5 (tùy chọn) ----------------
-        explanation = None
-        if self.enable_tang5:
-            t5_start = time.time()
-            try:
-                t5_result = _tang5_call_api.tang5_judge(
-                    sentence_a, sentence_b,
-                    model_label=final_label,
-                    model_probability=final_probability,
-                    provider=self.tang5_provider,
-                    api_key=self.tang5_api_key,
-                )
-                trace.append({"tang": 5, "result": t5_result, "time_ms": (time.time() - t5_start) * 1000})
-                explanation = t5_result.get("explanation")
-                self._log(f"Tầng 5: explanation={explanation}")
-            except Exception as e:
-                self._log(f"CẢNH BÁO: Tầng 5 lỗi ({e}), bỏ qua, dùng kết quả Tầng 4")
-
-        return self._finalize(
-            trace, label=final_label, probability=final_probability,
-            stopped_at="Tầng 4" + (" + Tầng 5" if explanation else ""),
-            start_time=start_time, explanation=explanation,
-        )
-
-    def _finalize(self, trace, label, probability, stopped_at, start_time, explanation=None):
-        total_time_ms = (time.time() - start_time) * 1000
-        return {
-            "label": label,
-            "probability": probability,
-            "stopped_at": stopped_at,
-            "explanation": explanation,
-            "total_time_ms": total_time_ms,
-            "trace": trace,
-        }
-
-
-if __name__ == "__main__":
-    pipeline = CaTEXPipeline(enable_tang5=False)
-
-    result = pipeline.predict(
-        "The economy grew rapidly last year.",
-        "Last year, the economy expanded at a fast pace.",
-    )
-
-    print("\n=== KẾT QUẢ CUỐI CÙNG ===")
-    print(f"Nhãn       : {result['label']}")
-    print(f"Xác suất   : {result['probability']}")
-    print(f"Dừng ở     : {result['stopped_at']}")
-    print(f"Thời gian  : {result['total_time_ms']:.1f} ms")
+            if self.judge is None:
+                from src.models.tang5_llm_judge.call_api import tang5_judge
+                judge=tang5_judge
+            else:judge=self.judge
+            explanation=judge(sentence_a,sentence_b,model_label=label,model_probability=final['probability'],
+                              provider=self.provider,api_key=self.api_key)
+            if not isinstance(explanation,dict) or explanation.get('parse_error') or not explanation.get('explanation'):
+                raise ValueError('Invalid explanation')
+            trace.append({'tang':5,'status':'ok','result':explanation,'time_ms':(perf_counter()-tick)*1000})
+            explanation_status='ok'
+        except Exception as exc:
+            explanation={'explanation':None,'changed_phrases':[]}
+            explanation_status='failed'
+            trace.append({'tang':5,'status':'error','error':type(exc).__name__,'time_ms':(perf_counter()-tick)*1000})
+        return {**final,'label':label,'scores':dict(zip(('lexical_similarity','pretrained_similarity','triplet_similarity','cross_logit'),values)),
+                'explanation':explanation['explanation'],'changed_phrases':explanation.get('changed_phrases',[]),
+                'explanation_status':explanation_status,'complete':explanation_status=='ok',
+                'trace':trace,'total_time_ms':(perf_counter()-start)*1000}

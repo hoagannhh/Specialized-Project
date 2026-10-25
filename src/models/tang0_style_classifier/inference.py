@@ -1,134 +1,52 @@
-"""
-Tầng 0 — Suy luận (dùng model + ngưỡng đã train)
-===================================================
+from pathlib import Path
+import sys
+if __package__ in (None, ''):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+import pandas as pd
+import torch
+from src.models.runtime import checkpoint_key, load_bundle, validate_texts, batches
+from src.models.tang0_style_classifier.model import SingleSentenceClassifier
 
-Load checkpoint đã train (model.py + train.py), có cache trong bộ
-nhớ để dùng lặp lại cho nhiều câu mà không phải load lại mỗi lần
-(cùng nguyên tắc với Tầng 1/2).
-"""
-
-import os
-
-try:
-    import torch
-    from transformers import AutoTokenizer
-except ImportError as e:
-    raise ImportError(f"Thiếu thư viện: {e}. Chạy: pip install torch transformers")
-
-from model import SingleSentenceClassifier, DEFAULT_PRETRAINED_NAME
+_cache = {}
 
 
-_cached_model = None
-_cached_tokenizer = None
-_cached_threshold = None
-
-
-def load_for_inference(
-    checkpoint_dir: str,
-    pretrained_name: str = DEFAULT_PRETRAINED_NAME,
-    use_cache: bool = True,
-):
-    """
-    Load model + tokenizer + ngưỡng đã lưu từ train.py.
-    """
-    global _cached_model, _cached_tokenizer, _cached_threshold
-
-    if use_cache and _cached_model is not None:
-        return _cached_model, _cached_tokenizer, _cached_threshold
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    model = SingleSentenceClassifier(pretrained_name=pretrained_name)
-    checkpoint_path = os.path.join(checkpoint_dir, "tang0_best.pt")
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
-    model.to(device)
-    model.eval()
-
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_name)
-
-    threshold_path = os.path.join(checkpoint_dir, "threshold.txt")
-    with open(threshold_path, "r") as f:
-        threshold = float(f.read().strip())
-
+def load_for_inference(checkpoint_dir, pretrained_name=None, use_cache=True, device=None):
+    key = checkpoint_key(checkpoint_dir, 0, device) + (pretrained_name,)
+    if use_cache and key in _cache:
+        return _cache[key]
+    model, tokenizer, meta = load_bundle(checkpoint_dir, 0, SingleSentenceClassifier, device)
+    if pretrained_name is not None and pretrained_name != meta['pretrained_name']:
+        raise ValueError('Backbone override disagrees with checkpoint metadata')
+    result = model, tokenizer, meta['threshold']
     if use_cache:
-        _cached_model, _cached_tokenizer, _cached_threshold = model, tokenizer, threshold
+        _cache.clear()
+        _cache[key] = result
+    return result
 
-    return model, tokenizer, threshold
 
-
-def predict_sentence(
-    sentence: str,
-    checkpoint_dir: str = "checkpoints/tang0",
-    max_length: int = 128,
-) -> dict:
-    """
-    Hàm CHÍNH dùng trong pipeline hệ thống mở rộng (input 1 file).
-
-    Output:
-        {
-            "probability": xác suất câu này là AI-touched (0-1),
-            "decision": "suspicious" (vượt ngưỡng, cần Web Search)
-                        hoặc "skip" (bỏ qua, không nghi ngờ)
-        }
-    """
+@torch.inference_mode()
+def predict_batch(sentences, checkpoint_dir='checkpoints/tang0', max_length=None, batch_size=32):
+    sentences = validate_texts(sentences)
+    if batch_size < 1:
+        raise ValueError('batch_size must be positive')
+    columns = ['sentence', 'probability', 'decision', 'threshold_used']
+    if not sentences:
+        return pd.DataFrame(columns=columns)
     model, tokenizer, threshold = load_for_inference(checkpoint_dir)
+    length = model._inference_metadata['max_length'] if max_length is None else max_length
     device = next(model.parameters()).device
-
-    encoding = tokenizer(
-        str(sentence),
-        truncation=True,
-        max_length=max_length,
-        padding="max_length",
-        return_tensors="pt",
-    )
-    input_ids = encoding["input_ids"].to(device)
-    attention_mask = encoding["attention_mask"].to(device)
-
-    probs = model.predict_proba(input_ids, attention_mask)
-    probability_ai = float(probs[0, 1].item())
-
-    decision = "suspicious" if probability_ai >= threshold else "skip"
-
-    return {"probability": probability_ai, "decision": decision, "threshold_used": threshold}
+    values = []
+    for batch in batches(sentences, batch_size):
+        encoded = tokenizer(batch, truncation=True, max_length=length, padding=True, return_tensors='pt')
+        probs = model.predict_proba(encoded['input_ids'].to(device), encoded['attention_mask'].to(device))
+        values.extend(probs[:, 1].cpu().tolist())
+    return pd.DataFrame({'sentence': sentences, 'probability': values,
+        'decision': ['suspicious' if p >= threshold else 'skip' for p in values],
+        'threshold_used': threshold})
 
 
-def predict_batch(
-    sentences: list,
-    checkpoint_dir: str = "checkpoints/tang0",
-    max_length: int = 128,
-    batch_size: int = 32,
-):
-    """
-    Phiên bản hàng loạt — xử lý nhiều câu cùng lúc theo batch, nhanh
-    hơn gọi predict_sentence() từng câu trong vòng lặp Python.
-    """
-    import pandas as pd
-
-    model, tokenizer, threshold = load_for_inference(checkpoint_dir)
-    device = next(model.parameters()).device
-
-    all_probs = []
-    for i in range(0, len(sentences), batch_size):
-        batch = [str(s) for s in sentences[i:i + batch_size]]
-        encoding = tokenizer(
-            batch, truncation=True, max_length=max_length,
-            padding="max_length", return_tensors="pt",
-        )
-        input_ids = encoding["input_ids"].to(device)
-        attention_mask = encoding["attention_mask"].to(device)
-
-        probs = model.predict_proba(input_ids, attention_mask)
-        all_probs.extend(probs[:, 1].cpu().tolist())
-
-    decisions = ["suspicious" if p >= threshold else "skip" for p in all_probs]
-
-    return pd.DataFrame({
-        "sentence": sentences,
-        "probability": all_probs,
-        "decision": decisions,
-    })
-
-
-if __name__ == "__main__":
-    result = predict_sentence("The rapid development of artificial intelligence has changed education.")
-    print(result)
+def predict_sentence(sentence, checkpoint_dir='checkpoints/tang0', max_length=None):
+    row = predict_batch([sentence], checkpoint_dir, max_length, batch_size=1).iloc[0]
+    return {'probability': float(row.probability), 'decision': row.decision,
+            'threshold_used': float(row.threshold_used), 'probability_calibrated': False,
+            'target': 'AI-touched'}

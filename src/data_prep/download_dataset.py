@@ -26,7 +26,7 @@ def download_humarin_dataset(output_path: str = HUMARIN_RAW_PATH) -> None:
     dataset = load_dataset("humarin/chatgpt-paraphrases")
 
     # Dataset này chỉ có 1 split "train", chưa chia sẵn train/val/test
-    # (việc chia sẽ do split_dataset.py đảm nhiệm ở bước sau)
+    # (việc chia nhóm nguồn do prepare_datasets.py đảm nhiệm ở bước sau)
     df = dataset["train"].to_pandas()
 
     print(f"Đã tải xong: {len(df)} dòng dữ liệu gốc")

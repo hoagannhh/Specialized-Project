@@ -426,5 +426,4 @@ def merge_datasets():
 # ============================================================
 
 if __name__ == "__main__":
-
-    merge_datasets()
+    raise SystemExit("Legacy pipeline retired. Run: python src/data_prep/prepare_datasets.py --strategy mixed")
