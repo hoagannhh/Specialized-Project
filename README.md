@@ -162,7 +162,7 @@ pip install -r requirements.txt
 cp .env.example .env   # rồi điền API key thật vào .env
 ```
 
-## Quy trình sử dụng
+##
 
 ### 1. Chuẩn bị dữ liệu
 
@@ -210,7 +210,7 @@ python src/models/tang3_triplet_encoder/train.py --train data/splits/triplet_dat
 python src/models/tang4_cross_encoder/train.py --train data/splits/pairwise_labeled_train.csv --val data/splits/pairwise_labeled_val.csv
 ```
 
-### Hợp đồng model sau khi sửa
+### model sau khi sửa
 
 - Tầng 2 và tầng 3 mặc định cùng khởi tạo từ
   `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`.
@@ -287,3 +287,10 @@ python src/pipeline/single_file_pipeline.py \
 
 - Chính: [`humarin/chatgpt-paraphrases`](https://huggingface.co/datasets/humarin/chatgpt-paraphrases)
 - Phụ (cross-eval + tăng cường Tầng 0): [`JonathanZha/PADBen`](https://huggingface.co/datasets/JonathanZha/PADBen)
+
+
+## Notebook thực nghiệm
+
+Sáu notebook trong `notebooks/` đã có luồng EDA → train 0/3/4 → đánh giá PADBen.
+Xem [hướng dẫn notebook](notebooks/README.md) để cấu hình đường dẫn và bật từng bước.
+Mặc định các bước train/đánh giá model nặng chưa bật; EDA chạy thật trên dữ liệu đã chuẩn bị.
