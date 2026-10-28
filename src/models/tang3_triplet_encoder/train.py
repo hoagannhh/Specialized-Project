@@ -16,6 +16,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from src.models.runtime import seed_everything, save_bundle, restore_best, select_threshold
 import os
+from src.models.training_checkpoint import TrainingRun, pause_cleanly, add_checkpoint_arguments
 
 import numpy as np
 import pandas as pd
@@ -73,7 +74,7 @@ class TripletDataset(Dataset):
 # ============================================================
 
 @torch.no_grad()
-def evaluate(model: BiEncoder, dataloader, device) -> float:
+def evaluate(model: BiEncoder, dataloader, device, check_time=None, loss_fn=None):
     """
     Đánh giá bằng % triplet mà model xếp ĐÚNG THỨ TỰ
     (similarity(A,P) > similarity(A,N)) — độ đo chuẩn cho bài toán
@@ -81,26 +82,33 @@ def evaluate(model: BiEncoder, dataloader, device) -> float:
     """
     model.eval()
     correct = 0
+    losses = []
     total = 0
 
     for batch in dataloader:
+        if check_time is not None:
+            check_time()
         anchor_emb = model(batch["anchor_ids"].to(device), batch["anchor_mask"].to(device))
         positive_emb = model(batch["positive_ids"].to(device), batch["positive_mask"].to(device))
         negative_emb = model(batch["negative_ids"].to(device), batch["negative_mask"].to(device))
 
+        if loss_fn is not None:
+            losses.append(loss_fn(anchor_emb, positive_emb, negative_emb).item())
         sim_ap = torch.sum(anchor_emb * positive_emb, dim=1)
         sim_an = torch.sum(anchor_emb * negative_emb, dim=1)
 
         correct += (sim_ap > sim_an).sum().item()
         total += sim_ap.size(0)
 
-    return correct / total if total > 0 else 0.0
+    accuracy = correct / total if total > 0 else 0.0
+    return (accuracy, float(np.mean(losses))) if loss_fn is not None else accuracy
 
 
 # ============================================================
 # TRAIN
 # ============================================================
 
+@pause_cleanly
 def train(
     train_csv: str,
     val_csv: str,
@@ -113,9 +121,17 @@ def train(
     num_epochs: int = 3,
     patience: int = 2,
     seed: int = 42,
+    resume_from: str = None,
+    save_every_steps: int = 500,
+    save_every_minutes: float = 10,
+    max_runtime_minutes: float = None,
 ):
     if min(batch_size, max_length, num_epochs, patience) < 1:
         raise ValueError('batch_size, max_length, num_epochs and patience must be positive')
+    run = TrainingRun(output_dir, 3, train_csv, val_csv,
+                      dict(pretrained_name=str(pretrained_name), max_length=max_length, batch_size=batch_size,
+                  learning_rate=learning_rate, patience=patience, seed=seed, margin=margin),
+                      resume_from, save_every_steps, save_every_minutes, max_runtime_minutes)
     seed_everything(seed)
     os.makedirs(output_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -127,26 +143,32 @@ def train(
         raise ValueError('Training and validation datasets must not be empty')
     print(f"Train: {len(df_train):,} triplet | Val: {len(df_val):,} triplet")
 
-    tokenizer = load_tokenizer(pretrained_name)
+    tokenizer = load_tokenizer(run.tokenizer_source)
 
     train_dataset = TripletDataset(df_train, tokenizer, max_length)
     val_dataset = TripletDataset(df_val, tokenizer, max_length)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size * 2, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size * 2, shuffle=False,
+                            generator=torch.Generator().manual_seed(seed))
 
-    model = BiEncoder(pretrained_name=pretrained_name).to(device)
+    model = BiEncoder(pretrained_name=pretrained_name, encoder_config=run.encoder_config).to(device)
     loss_fn = TripletLoss(margin=margin)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-    best_val_accuracy = float("-inf")
-    epochs_without_improvement = 0
+    run.attach(model, tokenizer, optimizer)
+    best_val_accuracy = run.state['best_metric']
+    epochs_without_improvement = run.state['bad_epochs']
 
-    for epoch in range(1, num_epochs + 1):
+    if num_epochs < run.state['epoch'] and not run.state['finished']:
+        raise ValueError('num_epochs là tổng số epoch, phải đủ để tiếp tục checkpoint hiện tại')
+    for epoch in range(run.state['epoch'], num_epochs + 1):
+        if run.state['finished']:
+            break
         model.train()
-        total_loss = 0.0
+        train_loader = run.loader(train_dataset, batch_size)
 
-        for batch in train_loader:
+        for batch_index, batch in enumerate(train_loader, start=run.state['next_batch']):
+            run.check_time()
             anchor_emb = model(batch["anchor_ids"].to(device), batch["anchor_mask"].to(device))
             positive_emb = model(batch["positive_ids"].to(device), batch["positive_mask"].to(device))
             negative_emb = model(batch["negative_ids"].to(device), batch["negative_mask"].to(device))
@@ -158,12 +180,14 @@ def train(
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
-            total_loss += loss.item()
+            run.after_step(batch_index, loss.item())
 
-        avg_train_loss = total_loss / len(train_loader)
-        val_accuracy = evaluate(model, val_loader, device)
+        # Lưu trước validation: bị ngắt ở đây chỉ cần chạy lại validation.
+        run.save()
+        avg_train_loss = run.state['total_loss'] / run.state['next_batch']
+        val_accuracy, val_loss = evaluate(model, val_loader, device, check_time=run.check_time, loss_fn=loss_fn)
 
-        print(f"\n[Epoch {epoch}] train_loss={avg_train_loss:.4f} "
+        print(f"\n[Epoch {epoch}] train_loss={avg_train_loss:.4f} val_loss={val_loss:.4f} "
               f"val_accuracy(AP>AN)={val_accuracy:.4f}")
 
         if val_accuracy > best_val_accuracy:
@@ -175,9 +199,13 @@ def train(
             print(f"  -> Lưu checkpoint tốt nhất: {checkpoint_path}")
         else:
             epochs_without_improvement += 1
-            if epochs_without_improvement >= patience:
-                print(f"  -> Early stopping (không cải thiện sau {patience} epoch)")
-                break
+        stopped = epochs_without_improvement >= patience
+        run.finish_epoch(best_val_accuracy, epochs_without_improvement, stopped or epoch == num_epochs,
+                         metrics=dict(train_loss=avg_train_loss, val_loss=val_loss,
+                                      val_accuracy=float(val_accuracy)))
+        if stopped:
+            print(f"  -> Early stopping (không cải thiện sau {patience} epoch)")
+            break
 
     print(f"\n=== Hoàn tất. Val accuracy tốt nhất: {best_val_accuracy:.4f} ===")
 
@@ -203,6 +231,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-epochs", type=int, default=3)
     parser.add_argument("--patience", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
+    add_checkpoint_arguments(parser)
     args = parser.parse_args()
 
     train(
@@ -210,4 +239,6 @@ if __name__ == "__main__":
         pretrained_name=args.pretrained_name, max_length=args.max_length,
         batch_size=args.batch_size, learning_rate=args.learning_rate,
         margin=args.margin, num_epochs=args.num_epochs, patience=args.patience, seed=args.seed,
+        resume_from=args.resume_from, save_every_steps=args.save_every_steps,
+        save_every_minutes=args.save_every_minutes, max_runtime_minutes=args.max_runtime_minutes,
     )

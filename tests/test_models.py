@@ -152,5 +152,105 @@ class ModelTests(unittest.TestCase):
             self.assertTrue((output/'tokenizer_config.json').exists())
 
 
+    def test_resume_mid_epoch_matches_uninterrupted_all_tiers(self):
+        from src.models.training_checkpoint import TrainingRun
+        frames = {
+            0: pd.DataFrame({'sentence':['the cat','a dog','the bird','a cat'], 'label':[0,1,0,1]}),
+            3: pd.DataFrame({'anchor':['the cat','a dog','the bird','a cat'],
+                             'positive':['a cat','the dog','a bird','the cat'],
+                             'negative':['a bird','the bird','a dog','the dog']}),
+            4: pd.DataFrame({'sentence_1':['the cat','a dog','the bird','a cat'],
+                             'sentence_2':['a cat','the bird','a bird','the dog'], 'label':[1,0,1,0]})}
+        for tier, folder in [(0,'tang0_style_classifier'),(3,'tang3_triplet_encoder'),(4,'tang4_cross_encoder')]:
+            module = importlib.import_module(f'src.models.{folder}.train')
+            csv = self.root / f'resume-data-{tier}.csv'
+            frames[tier].to_csv(csv, index=False)
+            kwargs = dict(train_csv=str(csv), val_csv=str(csv), pretrained_name=str(self.base),
+                          max_length=17, batch_size=2, num_epochs=2, seed=71, save_every_steps=1)
+            full = self.root / f'resume-full-{tier}'
+            module.train(output_dir=str(full), **kwargs)
+            expected = torch.load(full / f'tang{tier}_last.pt', weights_only=True)
+            for cutoff in (1, 3):
+                interrupted = self.root / f'resume-cut-{tier}-{cutoff}'
+                original = TrainingRun.after_step
+                def cut(run, index, loss):
+                    original(run, index, loss)
+                    if run.state['global_step'] == cutoff:
+                        raise RuntimeError('simulated process kill')
+                with patch.object(TrainingRun, 'after_step', cut):
+                    with self.assertRaisesRegex(RuntimeError, 'simulated process kill'):
+                        module.train(output_dir=str(interrupted), **kwargs)
+                checkpoint = torch.load(interrupted / f'tang{tier}_last.pt', weights_only=True)
+                self.assertEqual(checkpoint['progress']['next_batch'], 1)
+                self.assertEqual(checkpoint['progress']['global_step'], cutoff)
+                resumed = self.root / f'resume-result-{tier}-{cutoff}'
+                with patch('src.models.runtime.AutoModel.from_pretrained', side_effect=AssertionError('resume must be offline')):
+                    module.train(output_dir=str(resumed), resume_from=str(interrupted), **kwargs)
+                actual = torch.load(resumed / f'tang{tier}_last.pt', weights_only=True)
+                self.assertEqual(actual['progress'], expected['progress'])
+                self.assertEqual(actual['history'], expected['history'])
+                steps = pd.read_csv(resumed/'steps_history.csv')
+                self.assertEqual(steps.global_step.tolist(), [1, 2, 3, 4])
+                epochs = pd.read_csv(resumed/'epochs_history.csv')
+                self.assertEqual(epochs.epoch.tolist(), [1, 2])
+                self.assertTrue(np.isfinite(epochs.val_loss).all())
+                self.assertTrue((epochs.val_loss >= 0).all())
+                for key, value in expected['model'].items():
+                    torch.testing.assert_close(actual['model'][key], value, rtol=0, atol=0)
+                for pid, state in expected['optimizer']['state'].items():
+                    for key, value in state.items():
+                        torch.testing.assert_close(actual['optimizer']['state'][pid][key], value, rtol=0, atol=0)
+                for key, value in expected['best_bundle']['state_dict'].items():
+                    torch.testing.assert_close(actual['best_bundle']['state_dict'][key], value, rtol=0, atol=0)
+                # Không cho resume nhầm batch size hoặc CSV khác.
+                with self.assertRaisesRegex(ValueError, 'cấu hình'):
+                    module.train(output_dir=str(self.root / f'wrong-config-{tier}-{cutoff}'),
+                                 resume_from=str(interrupted), **dict(kwargs, batch_size=1))
+
+    def test_time_budget_saves_before_first_validation_and_resumes(self):
+        from src.models.tang4_cross_encoder import train as module
+        csv = self.root / 'budget-data.csv'
+        pd.DataFrame({'sentence_1':['the cat','the dog'], 'sentence_2':['a cat','a bird'],
+                      'label':[1,0]}).to_csv(csv,index=False)
+        kwargs = dict(train_csv=str(csv),val_csv=str(csv),pretrained_name=str(self.base),
+                      max_length=17,batch_size=1,num_epochs=1)
+        output = self.root / 'budget-output'
+        result = module.train(output_dir=str(output), max_runtime_minutes=1e-9, **kwargs)
+        self.assertIsNone(result)
+        saved = torch.load(output/'tang4_last.pt',weights_only=True)
+        self.assertEqual(saved['progress']['global_step'],0)
+        self.assertFalse((output/'tang4_best.pt').exists())
+        module.train(output_dir=str(output),resume_from=str(output), **kwargs)
+        self.assertTrue((output/'tang4_best.pt').exists())
+
+    def test_validation_interruption_keeps_completed_batches(self):
+        from src.models.tang4_cross_encoder import train as module
+        csv = self.root / 'validation-interruption.csv'
+        pd.DataFrame({'sentence_1':['the cat','the dog'], 'sentence_2':['a cat','a bird'],
+                      'label':[1,0]}).to_csv(csv,index=False)
+        kwargs = dict(train_csv=str(csv),val_csv=str(csv),pretrained_name=str(self.base),
+                      max_length=17,batch_size=1,num_epochs=1)
+        output = self.root / 'validation-interruption'
+        with patch.object(module, 'evaluate', side_effect=RuntimeError('validation interrupted')):
+            with self.assertRaisesRegex(RuntimeError, 'validation interrupted'):
+                module.train(output_dir=str(output), **kwargs)
+        saved = torch.load(output/'tang4_last.pt',weights_only=True)
+        self.assertEqual(saved['progress']['next_batch'],2)
+        with patch('torch.optim.AdamW.step', side_effect=AssertionError('already trained batches')):
+            module.train(output_dir=str(output), resume_from=str(output), **kwargs)
+        self.assertTrue((output/'tang4_best.pt').exists())
+
+    def test_atomic_checkpoint_failed_write_keeps_previous(self):
+        from src.models.training_checkpoint import atomic_save
+        path = self.root / 'atomic.pt'
+        atomic_save({'step': 7}, path)
+        def failed_save(payload, stream):
+            stream.write(b'partial')
+            raise OSError('disk full')
+        with patch('torch.save', side_effect=failed_save):
+            with self.assertRaises(OSError):atomic_save({'step':8}, path)
+        self.assertEqual(torch.load(path, weights_only=True)['step'],7)
+
+
 if __name__=='__main__':
     unittest.main()

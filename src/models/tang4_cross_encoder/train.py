@@ -16,6 +16,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from src.models.runtime import seed_everything, save_bundle, restore_best, select_threshold
 import os
+from src.models.training_checkpoint import TrainingRun, pause_cleanly, add_checkpoint_arguments
 
 import numpy as np
 import pandas as pd
@@ -73,28 +74,36 @@ class PairwiseDataset(Dataset):
 # ============================================================
 
 @torch.no_grad()
-def evaluate(model: CrossEncoderModel, dataloader, device):
+def evaluate(model: CrossEncoderModel, dataloader, device, check_time=None, loss_fn=None):
     model.eval()
     all_probs, all_labels = [], []
+    losses = []
 
     for batch in dataloader:
+        if check_time is not None:
+            check_time()
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         token_type_ids = batch.get("token_type_ids")
         if token_type_ids is not None:
             token_type_ids = token_type_ids.to(device)
 
-        probs = model.predict_proba(input_ids, attention_mask, token_type_ids)
+        logits = model(input_ids, attention_mask, token_type_ids)
+        probs = torch.sigmoid(logits)
+        if loss_fn is not None:
+            losses.append(loss_fn(logits, batch['label'].to(device)).item())
         all_probs.extend(probs.cpu().numpy())
         all_labels.extend(batch["label"].numpy())
 
-    return np.array(all_probs), np.array(all_labels)
+    result = (np.array(all_probs), np.array(all_labels))
+    return (*result, float(np.mean(losses))) if loss_fn is not None else result
 
 
 # ============================================================
 # TRAIN
 # ============================================================
 
+@pause_cleanly
 def train(
     train_csv: str,
     val_csv: str,
@@ -106,9 +115,17 @@ def train(
     num_epochs: int = 3,
     patience: int = 2,
     seed: int = 42,
+    resume_from: str = None,
+    save_every_steps: int = 500,
+    save_every_minutes: float = 10,
+    max_runtime_minutes: float = None,
 ):
     if min(batch_size, max_length, num_epochs, patience) < 1:
         raise ValueError('batch_size, max_length, num_epochs and patience must be positive')
+    run = TrainingRun(output_dir, 4, train_csv, val_csv,
+                      dict(pretrained_name=str(pretrained_name), max_length=max_length, batch_size=batch_size,
+                  learning_rate=learning_rate, patience=patience, seed=seed),
+                      resume_from, save_every_steps, save_every_minutes, max_runtime_minutes)
     seed_everything(seed)
     os.makedirs(output_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -123,26 +140,32 @@ def train(
     for name, frame in [('train', df_train), ('val', df_val)]:
         if set(frame['label'].unique()) != {0, 1}:
             raise ValueError(f'{name} requires both binary labels 0 and 1')
-    tokenizer = load_tokenizer(pretrained_name)
+    tokenizer = load_tokenizer(run.tokenizer_source)
 
     train_dataset = PairwiseDataset(df_train, tokenizer, max_length)
     val_dataset = PairwiseDataset(df_val, tokenizer, max_length)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size * 2, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size * 2, shuffle=False,
+                            generator=torch.Generator().manual_seed(seed))
 
-    model = CrossEncoderModel(pretrained_name=pretrained_name).to(device)
+    model = CrossEncoderModel(pretrained_name=pretrained_name, encoder_config=run.encoder_config).to(device)
     loss_fn = torch.nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-    best_val_f1 = float("-inf")
-    epochs_without_improvement = 0
+    run.attach(model, tokenizer, optimizer)
+    best_val_f1 = run.state['best_metric']
+    epochs_without_improvement = run.state['bad_epochs']
 
-    for epoch in range(1, num_epochs + 1):
+    if num_epochs < run.state['epoch'] and not run.state['finished']:
+        raise ValueError('num_epochs là tổng số epoch, phải đủ để tiếp tục checkpoint hiện tại')
+    for epoch in range(run.state['epoch'], num_epochs + 1):
+        if run.state['finished']:
+            break
         model.train()
-        total_loss = 0.0
+        train_loader = run.loader(train_dataset, batch_size)
 
-        for batch in train_loader:
+        for batch_index, batch in enumerate(train_loader, start=run.state['next_batch']):
+            run.check_time()
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["label"].to(device)
@@ -157,16 +180,18 @@ def train(
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
-            total_loss += loss.item()
+            run.after_step(batch_index, loss.item())
 
-        avg_train_loss = total_loss / len(train_loader)
+        # Lưu trước validation: bị ngắt ở đây chỉ cần chạy lại validation.
+        run.save()
+        avg_train_loss = run.state['total_loss'] / run.state['next_batch']
 
-        val_probs, val_labels = evaluate(model, val_loader, device)
+        val_probs, val_labels, val_loss = evaluate(model, val_loader, device, check_time=run.check_time, loss_fn=loss_fn)
         threshold, _ = select_threshold(val_probs, val_labels)
         val_preds = (val_probs >= threshold).astype(int)
         val_f1 = f1_score(val_labels, val_preds, zero_division=0)
 
-        print(f"\n[Epoch {epoch}] train_loss={avg_train_loss:.4f} val_F1={val_f1:.4f}")
+        print(f"\n[Epoch {epoch}] train_loss={avg_train_loss:.4f} val_loss={val_loss:.4f} val_F1={val_f1:.4f}")
 
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
@@ -177,12 +202,16 @@ def train(
             print(f"  -> Lưu checkpoint tốt nhất: {checkpoint_path}")
         else:
             epochs_without_improvement += 1
-            if epochs_without_improvement >= patience:
-                print(f"  -> Early stopping (không cải thiện sau {patience} epoch)")
-                break
+        stopped = epochs_without_improvement >= patience
+        run.finish_epoch(best_val_f1, epochs_without_improvement, stopped or epoch == num_epochs,
+                         metrics=dict(train_loss=avg_train_loss, val_loss=val_loss,
+                                      val_f1=float(val_f1), threshold=float(threshold)))
+        if stopped:
+            print(f"  -> Early stopping (không cải thiện sau {patience} epoch)")
+            break
 
     best_meta = restore_best(model, output_dir, 4)
-    val_probs, val_labels = evaluate(model, val_loader, device)
+    val_probs, val_labels = evaluate(model, val_loader, device, check_time=lambda: run.check_time(save=False))
     val_preds = (val_probs >= best_meta["threshold"]).astype(int)
 
     print(f"\n=== Báo cáo chi tiết (checkpoint tốt nhất, val_F1={best_val_f1:.4f}) ===")
@@ -207,6 +236,7 @@ if __name__ == "__main__":
     parser.add_argument("--num-epochs", type=int, default=3)
     parser.add_argument("--patience", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
+    add_checkpoint_arguments(parser)
     args = parser.parse_args()
 
     train(
@@ -214,4 +244,6 @@ if __name__ == "__main__":
         pretrained_name=args.pretrained_name, max_length=args.max_length,
         batch_size=args.batch_size, learning_rate=args.learning_rate,
         num_epochs=args.num_epochs, patience=args.patience, seed=args.seed,
+        resume_from=args.resume_from, save_every_steps=args.save_every_steps,
+        save_every_minutes=args.save_every_minutes, max_runtime_minutes=args.max_runtime_minutes,
     )
