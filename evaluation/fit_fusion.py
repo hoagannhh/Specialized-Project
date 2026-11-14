@@ -13,17 +13,39 @@ from src.pipeline.fusion import ScoreFusion, FEATURES, artifact_signature
 
 
 def validation_partition(frame, seed=42):
-    """Keep both endpoints of a pair on the same side of the fit/threshold split."""
+    """Create disjoint fit/threshold groups and preserve validation class priors."""
     required={'group_id','candidate_group_id','label'}
     if not required.issubset(frame.columns):
         raise ValueError('Validation CSV needs group_id, candidate_group_id and label')
     if frame[list(required)].isna().any().any():
         raise ValueError('Missing group IDs or labels')
+    if set(frame.label.unique()) != {0,1}:
+        raise ValueError('Validation CSV must contain both binary labels 0 and 1')
+
     def side(value):
-        digest=hashlib.sha256(f'{seed}:{value}'.encode()).digest()
+        # Namespace this second split; reusing the dataset split hash put every
+        # validation group on the same side and left the fit partition empty.
+        digest=hashlib.sha256(f'fusion-fit-threshold-v1:{seed}:{value}'.encode()).digest()
         return digest[0] < 128
+
+    def match_class_priors(part, target_distribution, random_state):
+        counts=part.label.value_counts().reindex([0,1],fill_value=0)
+        if (counts == 0).any():
+            return part
+        max_rows=min(counts[label]/target_distribution[label] for label in (0,1))
+        wanted={label:min(int(counts[label]),max(1,int(round(max_rows*target_distribution[label]))))
+                for label in (0,1)}
+        sampled=[part.loc[part.label == label].sample(n=wanted[label],random_state=random_state+label)
+                 for label in (0,1)]
+        return pd.concat(sampled).sample(frac=1,random_state=random_state)
+
     a=frame.group_id.map(side);b=frame.candidate_group_id.map(side)
-    return frame.loc[a & b],frame.loc[~a & ~b]
+    fit=frame.loc[a & b]
+    threshold=frame.loc[~a & ~b]
+    target_distribution=frame.label.value_counts(normalize=True).reindex([0,1])
+    fit=match_class_priors(fit,target_distribution,seed)
+    threshold=match_class_priors(threshold,target_distribution,seed+1)
+    return fit,threshold
 
 
 def score_pairs(frame, batch_size=32):
@@ -55,7 +77,9 @@ def main():
     # Check partitions before expensive inference.
     fit,threshold=validation_partition(frame)
     if any(set(part.label)!={0,1} for part in (fit,threshold)):
-        raise ValueError('Each partition must contain both classes; use more validation groups')
+        counts={name:part.label.value_counts().to_dict()
+                for name,part in [('fit',fit),('threshold',threshold)]}
+        raise ValueError(f'Both labels are required in fit and threshold partitions; counts={counts}')
     signature=artifact_signature(config.TANG1_VECTORIZER_PATH,config.TANG3_CHECKPOINT_DIR,config.TANG4_CHECKPOINT_DIR,config.TANG2_MODEL_NAME)
     scored=[]
     for part in (fit,threshold):
@@ -67,7 +91,10 @@ def main():
     fusion=ScoreFusion.fit(scored[0],fit.label.to_numpy(),scored[1],threshold.label.to_numpy(),signature)
     fusion.save(args.output)
     report={'validation':str(Path(args.validation).resolve()),'rows':len(frame),'fit_rows':len(fit),
-            'threshold_rows':len(threshold),'discarded_cross_partition_pairs':len(frame)-len(fit)-len(threshold),
+            'threshold_rows':len(threshold),
+            'excluded_group_crossing_or_balance_rows':len(frame)-len(fit)-len(threshold),
+            'fit_label_counts':fit.label.value_counts().sort_index().to_dict(),
+            'threshold_label_counts':threshold.label.value_counts().sort_index().to_dict(),
             'threshold':fusion.threshold,'features':FEATURES,'signature':signature,'probability_calibrated':False,
             'smoke_test_limit':args.limit}
     Path(args.output).with_suffix('.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
