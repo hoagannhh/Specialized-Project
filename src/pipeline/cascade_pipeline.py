@@ -51,6 +51,18 @@ class CaTEXPipeline:
         model,tokenizer=load_model(self.model2_name)
         return sbert_filter_batch([(query,c) for c in candidates],model,tokenizer).similarity.to_numpy()
 
+    def closest_source_sentences(self, suspects, sources):
+        """Ghép mỗi câu kiểm tra với câu nguồn gần nhất theo cosine SBERT."""
+        if len(sources) == 1:
+            return [0] * len(suspects)
+        from src.models.runtime import encode_texts
+        from src.models.tang2_sbert_pretrained.encode import load_model
+        model, tokenizer = load_model(self.model2_name)
+        # BiEncoder đã chuẩn hóa L2. Mỗi câu chỉ cần mã hóa một lần để tìm nguồn.
+        vectors = encode_texts(sources + suspects, model, tokenizer)
+        source_vectors = vectors[:len(sources)]
+        return (vectors[len(sources):] @ source_vectors.T).argmax(dim=1).tolist()
+
     def predict(self,sentence_a,sentence_b):
         """Compatibility order: suspect first, source second."""
         if any(not isinstance(s,str) or not s.strip() for s in (sentence_a,sentence_b)):

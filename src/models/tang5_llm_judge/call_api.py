@@ -14,12 +14,38 @@ cách an toàn, không crash chương trình nếu LLM "làm sai yêu cầu".
 import json
 import os
 import re
+from time import monotonic
+from threading import Lock
 
 from pathlib import Path
 import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from src.models.tang5_llm_judge.prompts import build_judge_prompt
+from src.utils.config import configured_llm_keys
+
+_gemini_key_lock = Lock()
+_gemini_active_key = {}
+_gemini_retry_at = {}
+
+
+class GeminiQuotaExhausted(Exception):
+    """Mọi key đã cấu hình cho model này đều đang chờ quota."""
+
+
+def _gemini_quota_delay(error):
+    """Đọc số giây chờ từ Gemini, mặc định một phút nếu thiếu thông tin."""
+    headers = getattr(error.response, 'headers', {})
+    hints = [headers.get('retry-after')]
+    payload = error.details if isinstance(error.details, dict) else {}
+    error_body = payload.get('error', payload)
+    details = error_body.get('details') if isinstance(error_body, dict) else None
+    for detail in details or []:
+        if isinstance(detail, dict) and detail.get('@type') == 'type.googleapis.com/google.rpc.RetryInfo':
+            hints.append(detail.get('retryDelay'))
+    seconds = [float(str(hint).removesuffix('s')) for hint in hints
+               if hint is not None and re.fullmatch(r'\d+(?:\.\d+)?s?', str(hint))]
+    return max(1.0, max(seconds, default=60.0))
 
 
 def _extract_json_from_text(text: str) -> dict:
@@ -102,28 +128,52 @@ def call_gemini(prompt: str, model: str = None, api_key: str = None) -> str:
     """Gọi Google Gemini API, trả về text thô (chưa parse JSON)."""
     try:
         from google import genai
-        from google.genai import types
+        from google.genai import errors, types
     except ImportError:
         raise ImportError("Chưa cài thư viện Google GenAI. Chạy: pip install google-genai")
 
-    api_key = api_key or os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError(
-            "Thiếu Gemini API key. Truyền qua tham số api_key hoặc đặt "
-            "biến môi trường GEMINI_API_KEY."
-        )
-
     model = model or os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
-    client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.0,
-            response_mime_type="application/json",
-        ),
-    )
-    return response.text or ""
+    request_config = types.GenerateContentConfig(temperature=0.0, response_mime_type="application/json")
+
+    def generate(key):
+        client = genai.Client(api_key=key)
+        try:
+            response = client.models.generate_content(model=model, contents=prompt, config=request_config)
+            return response.text or ""
+        finally:
+            close = getattr(client, "close", None)
+            if close:
+                close()
+
+    if api_key:
+        return generate(api_key)
+    keys = configured_llm_keys("gemini")
+    if not keys:
+        raise ValueError("Chưa cấu hình GEMINI_API_KEYS hoặc GEMINI_API_KEY cho tầng 5.")
+
+    attempted = set()
+    while len(attempted) < len(keys):
+        # Chỉ khóa lúc chọn key. Các yêu cầu mạng có thể chạy đồng thời.
+        with _gemini_key_lock:
+            now = monotonic()
+            available = [key for key in keys if key not in attempted
+                         and _gemini_retry_at.get((model, key), 0) <= now]
+            if not available:
+                break
+            active = _gemini_active_key.get(model)
+            key = active if active in available else available[0]
+            _gemini_active_key[model] = key
+        attempted.add(key)
+        try:
+            return generate(key)
+        except errors.APIError as exc:
+            if exc.code != 429:
+                raise
+            retry_at = monotonic() + _gemini_quota_delay(exc)
+            with _gemini_key_lock:
+                slot = (model, key)
+                _gemini_retry_at[slot] = max(_gemini_retry_at.get(slot, 0), retry_at)
+    raise GeminiQuotaExhausted("Các key Gemini đã cấu hình đều đang bị giới hạn. Vui lòng thử lại sau.")
 
 
 def tang5_judge(

@@ -2,6 +2,7 @@
 import base64
 import json
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 import zipfile
@@ -9,6 +10,7 @@ import zipfile
 from src.utils import config
 from src.document_processing.file_reader import read_document
 from src.document_processing.sentence_splitter import split_sentences_with_position
+from src.document_processing.highlight_exporter import export_highlighted_html, export_highlighted_docx
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / 'output' / 'demo'
@@ -45,14 +47,14 @@ def capabilities():
     tiers['2'] = {'ready': True,
                   'detail': f'Pretrained: {config.TANG2_MODEL_NAME}; lần đầu có thể cần tải model'}
     provider = config.TANG5_PROVIDER
-    provider_keys = {'openai': 'OPENAI_API_KEY', 'anthropic': 'ANTHROPIC_API_KEY',
-                     'gemini': 'GEMINI_API_KEY'}
-    key_name = provider_keys.get(provider)
-    key = os.getenv(key_name, '') if key_name else ''
-    tiers['5'] = {'ready': bool(key) and 'xxxx' not in key,
-                  'detail': (f'LLM: {provider} (đã cấu hình; chưa kiểm tra kết nối)' if
-                             bool(key) and 'xxxx' not in key
-                             else f'Chưa cấu hình API key cho LLM ({provider})')}
+    key_count = len(config.configured_llm_keys(provider))
+    if key_count > 1:
+        llm_detail = f'LLM: {provider} ({key_count} key, tự chuyển khi gặp lỗi quota 429)'
+    elif key_count == 1:
+        llm_detail = f'LLM: {provider} (đã cấu hình; chưa kiểm tra kết nối)'
+    else:
+        llm_detail = f'Chưa cấu hình API key cho LLM ({provider})'
+    tiers['5'] = {'ready': bool(key_count), 'detail': llm_detail}
     fusion = config.FUSION_PATH.is_file()
     web = all(os.getenv(k) and 'xxxx' not in os.getenv(k) for k in ['GOOGLE_SEARCH_API_KEY','GOOGLE_SEARCH_ENGINE_ID'])
     fusion_detail = 'Đã có bộ kết hợp điểm' if fusion else f'Thiếu {config.FUSION_PATH.relative_to(ROOT)}'
@@ -101,6 +103,43 @@ def spans_for(doc):
     return spans
 
 
+def _pasted_sentences(text):
+    # Giữ nguyên số ký tự để ánh xạ highlight khi người dùng dán Markdown in đậm.
+    plain = re.sub(r'\*\*(?=\S)(.+?)(?<=\S)\*\*', r'  \1  ', text, flags=re.DOTALL)
+    rows = split_sentences_with_position(plain)
+    for row in rows:
+        row['model_text'] = row['sentence']
+        row['sentence'] = ' '.join(text[row['start']:row['end']].split())
+    return rows
+
+
+def _compare_passages(pipeline, suspect, source, progress):
+    queries = _pasted_sentences(suspect)
+    sources = _pasted_sentences(source)
+    if not queries or not sources:
+        raise ValueError('Mỗi đoạn cần có ít nhất một câu để đối chiếu.')
+    matches = pipeline.closest_source_sentences(
+        [span['model_text'] for span in queries], [span['model_text'] for span in sources])
+    results = []
+    predictions = {}
+    for i, (span, j) in enumerate(zip(queries, matches)):
+        progress(f'Đang đối chiếu câu {i + 1}/{len(queries)} với câu nguồn {j + 1}…')
+        candidate = sources[j]
+        pair = span['model_text'], candidate['model_text']
+        if pair not in predictions:
+            predictions[pair] = pipeline.predict(*pair)
+        prediction = predictions[pair]
+        results.append({**prediction, 'sentence_id': i, 'sentence': span['sentence'],
+                        'start': span['start'], 'end': span['end'], 'status': prediction['decision'],
+                        'source_sentence_id': j, 'matched_source_sentence': candidate['sentence'],
+                        'source_start': candidate['start'], 'source_end': candidate['end']})
+    best = max(predictions.values(), key=lambda p: p['probability'])
+    return {**best, 'complete': all(row['complete'] for row in results),
+            'score_scope': 'best_sentence_pair', 'original_text': suspect, 'results': results,
+            'suspect': suspect, 'source': source, 'total_sentences': len(results),
+            'suspicious_sentences': sum(row['status'] == 'suspicious' for row in results)}
+
+
 def analyze(payload, job_id, progress):
     directory=OUTPUT/job_id;directory.mkdir(parents=True,exist_ok=True)
     mode=payload.get('mode','normal');kind=payload.get('kind','pair')
@@ -116,22 +155,27 @@ def analyze(payload, job_id, progress):
         pipeline_loaded = _pair_pipeline.cache_info().currsize > 0
         progress('Đang đối chiếu bằng pipeline đã nạp…' if pipeline_loaded
                  else 'Lượt đầu: đang khởi tạo pipeline và nạp model…')
-        result={**_pair_pipeline().predict(suspect,source),'kind':kind,'mode':mode,
-                'pipeline':'five_tier','source':source,'suspect':suspect,
-                'warnings':['Cặp câu chạy đủ 5 tầng. Kết quả là gợi ý đối chiếu; điểm fusion chưa được hiệu chỉnh.']}
+        result = _compare_passages(_pair_pipeline(), suspect, source, progress)
+        result.update(kind=kind, mode=mode, pipeline='five_tier', format='txt',
+                      file_path='doan-kiem-tra.txt', warnings=[])
     else:
         progress('Đang đọc tài liệu…');doc=document_input(payload.get('document'),directory,'input')
         if len(spans_for(doc))>200:raise ValueError('Demo giới hạn 200 câu kiểm tra')
-        from src.document_processing.highlight_exporter import export_highlighted_html,export_highlighted_docx
         retrieval='economy' if mode=='normal' else 'full'
         if mode=='normal':
             progress('Kiểm tra thường: Bước 0 chọn câu cần tìm nguồn; mỗi cặp chạy đủ 5 tầng…')
         else:
             progress('Kiểm tra sâu: tìm nguồn cho mọi câu; mỗi cặp chạy đủ 5 tầng…')
         result=_document_pipeline(retrieval).process_document(doc)
-        export_highlighted_html(result,directory/'report.html');export_highlighted_docx(result,directory/'report.docx')
         result.update(kind=kind,mode=mode,retrieval=retrieval,pipeline='five_tier')
         result.setdefault('warnings',[]).append('Mỗi cặp nguồn được chấm qua đủ 5 tầng. Điểm fusion chưa được hiệu chỉnh; kết quả là gợi ý đối chiếu.')
+    pairs = result['results'] if kind == 'pair' else (
+        pair for row in result['results'] for pair in row.get('evidence', [])
+    )
+    if any(step.get('error') == 'GeminiQuotaExhausted' for pair in pairs for step in pair.get('trace', [])):
+        result['warnings'].append('Tầng 5 chưa giải thích được một số kết quả vì tất cả key Gemini đều đang bị giới hạn. Bạn có thể thử lại sau.')
+    export_highlighted_html(result, directory / 'report.html')
+    export_highlighted_docx(result, directory / 'report.docx')
     (directory/'report.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf8')
     result['downloads']={suffix:f'/api/jobs/{job_id}/report.{suffix}' for suffix in ['json','html','docx'] if (directory/f'report.{suffix}').exists()}
     return result

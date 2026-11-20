@@ -22,7 +22,10 @@ def _details(row):
     pieces=[f"Câu {row['sentence_id']+1}: {row['label']}"]
     if row.get('probability') is not None:pieces.append(f"Điểm dự đoán (chưa hiệu chỉnh): {row['probability']:.4f}")
     if row.get('source_url'):pieces.append('Nguồn đối chiếu: '+row['source_url'])
-    if row.get('matched_source_sentence'):pieces.append('Đoạn nguồn: '+row['matched_source_sentence'])
+    if row.get('matched_source_sentence'):
+        source_label = (f"Câu nguồn {row['source_sentence_id'] + 1}"
+                        if 'source_sentence_id' in row else 'Đoạn nguồn')
+        pieces.append(f"{source_label}: {row['matched_source_sentence']}")
     if row.get('explanation'):pieces.append('Giải thích: '+row['explanation'])
     if row.get('explanation_status')=='failed':pieces.append('Tầng 5 không tạo được giải thích; kết quả chưa đầy đủ.')
     if row.get('complete') is False:pieces.append('Chưa hoàn tất tất cả nguồn hoặc tầng xử lý.')
