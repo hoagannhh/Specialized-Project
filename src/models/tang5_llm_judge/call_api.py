@@ -2,8 +2,8 @@
 Tầng 5 — Gọi API LLM và parse kết quả
 ========================================
 
-Hỗ trợ 2 nhà cung cấp phổ biến: OpenAI (GPT) và Anthropic (Claude).
-Chọn 1 trong 2 tùy theo API key bạn có sẵn.
+Hỗ trợ OpenAI (GPT), Anthropic (Claude) và Google Gemini.
+Chọn provider theo API key được cấu hình trong môi trường.
 
 QUAN TRỌNG: LLM đôi khi trả về JSON kèm theo text thừa (markdown code
 fence ```json ... ```, hoặc vài câu giải thích trước/sau) dù đã yêu
@@ -98,6 +98,34 @@ def call_anthropic(prompt: str, model: str = "claude-sonnet-4-5", api_key: str =
     return response.content[0].text
 
 
+def call_gemini(prompt: str, model: str = None, api_key: str = None) -> str:
+    """Gọi Google Gemini API, trả về text thô (chưa parse JSON)."""
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError:
+        raise ImportError("Chưa cài thư viện Google GenAI. Chạy: pip install google-genai")
+
+    api_key = api_key or os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "Thiếu Gemini API key. Truyền qua tham số api_key hoặc đặt "
+            "biến môi trường GEMINI_API_KEY."
+        )
+
+    model = model or os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0.0,
+            response_mime_type="application/json",
+        ),
+    )
+    return response.text or ""
+
+
 def tang5_judge(
     sentence_a: str,
     sentence_b: str,
@@ -111,7 +139,7 @@ def tang5_judge(
 
     Parameters
     ----------
-    provider : "openai" hoặc "anthropic"
+    provider : "openai", "anthropic" hoặc "gemini"
     """
     # Compatibility: the document pipeline passes suspect first, source second.
     suspect_sentence, source_sentence = sentence_a, sentence_b
@@ -122,8 +150,13 @@ def tang5_judge(
         raw_text = call_openai(prompt, api_key=api_key)
     elif provider == "anthropic":
         raw_text = call_anthropic(prompt, api_key=api_key)
+    elif provider == "gemini":
+        raw_text = call_gemini(prompt, api_key=api_key)
     else:
-        raise ValueError(f"provider không hợp lệ: {provider} (chỉ nhận 'openai' hoặc 'anthropic')")
+        raise ValueError(
+            f"provider không hợp lệ: {provider} "
+            "(chỉ nhận 'openai', 'anthropic' hoặc 'gemini')"
+        )
 
     result = _extract_json_from_text(raw_text)
 

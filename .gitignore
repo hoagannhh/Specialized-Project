@@ -56,6 +56,29 @@ evaluation/results/*
 
 output/*
 
+# Báo cáo, slide và tài liệu soạn thảo
+/doc/
+/docs/*
+!/docs/PIPELINE.md
+/BaoCao/
+/reports/
+/slides/
+*.doc
+*.docx
+*.odt
+*.ppt
+*.pptx
+*.odp
+*.pdf
+*.tex
+*.bib
+
+# Giữ tài liệu mẫu dùng cho kiểm thử bộ đọc file
+!/tests/fixtures/**
+
+# File tạm khi xuất biểu đồ PowerPoint
+/.chart-data-*/
+
 # Notebook output (giữ code, bỏ output để diff/review dễ hơn)
 # Nếu muốn giữ cả output đã chạy, comment dòng dưới
 # notebooks/*.ipynb filter=strip-notebook-output

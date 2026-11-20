@@ -22,10 +22,11 @@ transformers>=4.35.0
 datasets>=2.14.0
 
 # ============================================================
-# Tầng 5 — LLM-as-a-Judge (chỉ cần 1 trong 2, tùy provider dùng)
+# Tầng 5 — LLM-as-a-Judge (chỉ cần thư viện của provider đang dùng)
 # ============================================================
 openai>=1.0.0
 anthropic>=0.18.0
+google-genai>=1.0.0
 
 # ============================================================
 # Retrieval — Web Search (hệ thống mở rộng input-1-file)

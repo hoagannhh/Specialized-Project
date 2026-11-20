@@ -27,13 +27,18 @@ def ensure_all_dirs():
 
 def check_required_keys(require_tang5=False, require_web_search=False, provider=None, api_key=None):
     provider = provider or TANG5_PROVIDER
-    if provider not in ('openai','anthropic'):
+    provider_keys = {
+        'openai': 'OPENAI_API_KEY',
+        'anthropic': 'ANTHROPIC_API_KEY',
+        'gemini': 'GEMINI_API_KEY',
+    }
+    if provider not in provider_keys:
         raise ValueError('Unsupported LLM provider')
     required=[]
     if require_web_search:
         required += ['GOOGLE_SEARCH_API_KEY','GOOGLE_SEARCH_ENGINE_ID']
     if require_tang5 and not api_key:
-        required += ['OPENAI_API_KEY' if provider=='openai' else 'ANTHROPIC_API_KEY']
+        required += [provider_keys[provider]]
     missing=[k for k in required if not os.getenv(k)]
     if missing:
         raise EnvironmentError('Missing configuration: '+', '.join(missing))

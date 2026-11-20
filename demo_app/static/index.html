@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CaTE-X · Đối chiếu văn bản</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <aside>
+    <a class="brand" href="/">CaTE<span>—</span>X<i>RESEARCH WORKSPACE</i></a>
+    <div class="nav-title">KHÔNG GIAN LÀM VIỆC</div>
+    <button class="nav active" data-tab="pair">↔ <span>So sánh hai đoạn</span></button>
+    <button class="nav" data-tab="document">▤ <span>Kiểm tra tài liệu</span></button>
+    <div class="sidebar-bottom">
+      <div class="orb"></div>
+      <strong>Model của bạn. Dữ liệu của bạn.</strong>
+      <p>Tài liệu chạy qua pipeline 5 tầng. Web Search và LLM dùng API đã cấu hình.</p>
+      <small>CaTE-X · AI-paraphrase research</small>
+    </div>
+  </aside>
+  <main>
+    <header><span>PHÒNG THỰC NGHIỆM / ĐỐI CHIẾU</span><button id="refresh" class="quiet">↻ Kiểm tra model</button></header>
+    <section class="hero">
+      <div class="eyebrow">THEO DÕI BẰNG CHỨNG QUA 5 TẦNG</div>
+      <h1 id="title">Hai cách diễn đạt.<br>Một nội dung?</h1>
+      <p id="intro">Đưa hai đoạn văn vào để phân tích quan hệ paraphrase.</p>
+    </section>
+    <section class="system">
+      <div class="system-head"><strong>Trạng thái hệ thống</strong><span id="ready-label">Đang kiểm tra…</span></div>
+      <div id="tiers" class="tiers"></div>
+      <details>
+        <summary>Các thành phần cần cho luồng đầy đủ</summary>
+        <p id="requirements"></p>
+        <small id="status-note"></small>
+      </details>
+    </section>
+    <div class="toolbar">
+      <div>
+        <label for="mode">CHẾ ĐỘ KIỂM TRA</label>
+        <select id="mode">
+          <option value="normal">Kiểm tra thường · chọn câu qua Bước 0</option>
+          <option value="deep">Kiểm tra sâu · tìm nguồn mọi câu</option>
+        </select>
+      </div>
+      <button id="example" class="quiet">＋ Điền ví dụ tiếng Anh</button>
+    </div>
+    <div id="mode-note" class="notice">Cả hai chế độ đều chạy đủ 5 tầng cho từng cặp văn bản.</div>
+    <form id="analysis-form">
+      <section id="pair-panel" class="inputs">
+        <article class="card">
+          <div class="card-top"><span class="number">01</span><strong>Đoạn nguồn đối chiếu</strong></div>
+          <textarea id="source" maxlength="8000" placeholder="Dán đoạn văn bản nguồn tại đây…" aria-label="Đoạn nguồn đối chiếu"></textarea>
+          <div class="card-foot">Nguồn do bạn cung cấp<span id="source-count">0 ký tự</span></div>
+        </article>
+        <article class="card">
+          <div class="card-top"><span class="number violet">02</span><strong>Đoạn cần kiểm tra</strong></div>
+          <textarea id="suspect" maxlength="8000" placeholder="Dán đoạn cần kiểm tra tại đây…" aria-label="Đoạn cần kiểm tra"></textarea>
+          <div class="card-foot">Nên dùng câu hoặc đoạn ngắn<span id="suspect-count">0 ký tự</span></div>
+        </article>
+      </section>
+      <section id="document-panel" hidden>
+        <div class="inputs">
+          <article class="card">
+            <div class="card-top"><span class="number">01</span><strong>Tài liệu cần kiểm tra</strong></div>
+            <div class="upload">
+              <label for="document-file">↑ Chọn tài liệu TXT, DOCX hoặc PDF</label>
+              <input type="file" id="document-file" accept=".txt,.docx,.pdf">
+              <small>Tối đa 8 MB · PDF cần có lớp văn bản</small>
+            </div>
+            <textarea id="document-text" maxlength="40000" placeholder="Hoặc dán nội dung tài liệu…" aria-label="Nội dung tài liệu"></textarea>
+          </article>
+        </div>
+      </section>
+      <div class="actions"><span id="availability">Đang kiểm tra thành phần pipeline…</span><button type="submit" id="submit">Chạy đủ 5 tầng ↗</button></div>
+    </form>
+    <div id="progress" role="status" hidden><span class="spinner"></span><span id="progress-text"></span><small>Giữ trang mở để nhận kết quả.</small></div>
+    <div id="error" class="error" role="alert" hidden></div>
+    <section id="results" hidden></section>
+    <footer>CaTE-X / Cascade Triplet Encoder with eXplanation <span>Công cụ hỗ trợ đối chiếu · Người dùng xem xét kết quả cuối cùng</span></footer>
+  </main>
+</body>
+</html>

@@ -22,7 +22,7 @@ python src/pipeline/single_file_pipeline.py --input document.docx --output outpu
 
 Fusion đọc `sentence_1,sentence_2,label,group_id,candidate_group_id` từ validation. Chia theo nguồn thành phần fit trọng số và phần chọn ngưỡng, bỏ cặp nối hai nhóm khác phần. Không fit trên test. Validation này đã dùng để chọn checkpoint nên không phải tập đánh giá độc lập; chất lượng cuối phải đo trên test. `--limit` chỉ phục vụ thử chạy, không dùng artifact từ mẫu nhỏ để công bố chất lượng. Nếu đổi TF-IDF hoặc checkpoint 3/4, phải fit lại fusion; chữ ký artifact được kiểm tra khi nạp.
 
-Trong `.env` đặt `GOOGLE_SEARCH_API_KEY`, `GOOGLE_SEARCH_ENGINE_ID`, cùng `OPENAI_API_KEY` hoặc `ANTHROPIC_API_KEY`; dùng `--provider openai` hoặc `--provider anthropic`. Lệnh xử lý tài liệu thực tế gọi dịch vụ ngoài. Script fit fusion và đánh giá model không gọi LLM; lần đầu nạp backbone có thể cần tải model.
+Trong `.env` đặt `GOOGLE_SEARCH_API_KEY`, `GOOGLE_SEARCH_ENGINE_ID` và key của provider tầng 5 (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY` hoặc `GEMINI_API_KEY`). Chọn provider bằng `TANG5_PROVIDER` hoặc tham số `--provider` (`openai`, `anthropic`, `gemini`). Lệnh xử lý tài liệu thực tế gọi dịch vụ ngoài. Script fit fusion và đánh giá model không gọi LLM; lần đầu nạp backbone có thể cần tải model.
 
 `demo_app/app.py` là điểm chạy CLI tương đương, chưa phải giao diện web.
 

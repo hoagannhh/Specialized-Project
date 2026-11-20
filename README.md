@@ -1,5 +1,13 @@
 # Specialized-Project
 
+## Chạy demo giao diện
+
+```powershell
+.\.venv\Scripts\python.exe demo_app/app.py
+```
+
+Mở http://127.0.0.1:8501. Có thể khảo sát ngay với checkpoint tầng 3; xem [hướng dẫn demo](demo_app/README.md) để nhập tài liệu, tải báo cáo và bổ sung các model cho pipeline đầy đủ.
+
 > Hướng dẫn vận hành hiện tại: [docs/PIPELINE.md](docs/PIPELINE.md).
 > Cây thư mục đầu trang là phác thảo ban đầu; tên split và lệnh chạy thực tế xem bên dưới.
 plagiarism-detection-catex/

@@ -120,7 +120,7 @@ def main():
     parser.add_argument('--output',default='output/report.html')
     parser.add_argument('--mode',choices=['full','economy'],default='full')
     parser.add_argument('--fusion',default=str(config.FUSION_PATH))
-    parser.add_argument('--provider',choices=['openai','anthropic'],default=config.TANG5_PROVIDER)
+    parser.add_argument('--provider',choices=['openai','anthropic','gemini'],default=config.TANG5_PROVIDER)
     args=parser.parse_args()
     output=Path(args.output)
     if output.suffix.lower() not in ('.html','.docx'):parser.error('--output must end in .html or .docx')
